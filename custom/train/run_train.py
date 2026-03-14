@@ -5,193 +5,175 @@
 # ------------------------------------------------------------------------
 
 """
-文件说明：本文件是当前双模态 RF-DETR 实验的训练启动脚本。
-功能：集中维护训练所需的实验参数，创建输出目录，构建双模态模型，并调用 RF-DETR
-      原有训练循环启动训练。
+文件说明：本文件是当前 `custom/train` 下的统一训练启动器。
+功能说明：集中维护双模态与 UV-only 两种实验模式共享的大部分训练参数，并在运行时按
+模式切换数据集补丁、融合配置、输出目录与日志前缀，减少两套脚本长期漂移。
 
 结构概览：
-  第一部分：导入依赖与路径设置
+  第一部分：导入依赖与路径初始化
   第二部分：实验参数区
-  第三部分：训练启动主流程
-
-使用方式：
-  - 直接运行本脚本即可启动训练。
-  - 如需做 ablation，uv单模态用另外一个py文件，这个双模态脚本目前有点乱
-
-约束说明：
-  - 本脚本只负责“实验级配置与启动”，不改动 RF-DETR 主训练框架。
-  - UV 是主模态，White 是辅助模态；因此 baseline 与 fusion 都通过少量开关切换。
+  第三部分：模式解析
+  第四部分：训练主流程
 """
 
-# ========== 第一部分：导入依赖与路径设置 ==========
+from __future__ import annotations
+
 import os
 import sys
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
-# 将项目根目录加入 sys.path，确保脚本可以直接导入 custom/ 与 rfdetr/。
-_PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-if _PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, _PROJECT_ROOT)
-
-# 切换工作目录，确保相对路径（例如 datasets、output/train）都以项目根目录为基准。
+# ========== 第一部分：导入依赖与路径初始化 ==========
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 os.chdir(_PROJECT_ROOT)
 
-
 # ========== 第二部分：实验参数区 ==========
-# ---------- 数据集配置 ----------
+# Dataset
 DATASET_DIR = "datasets"
 CLASS_NAMES = ["NPML", "PML", "PM"]
 NUM_CLASSES = 3
 
-# ---------- 模型与融合配置 ----------
+# Model
 PRETRAIN_WEIGHTS = "rf-detr-base.pth"
-DUAL_MODAL = True
-
-# 是否启用 White 辅助模态。
-# 若设为 False，则可得到 UV-only baseline。
+MODALITY_MODE = "dual_uv_white"
+SUPPORTED_MODALITY_MODES = {"dual_uv_white", "uv_only"}
 USE_WHITE = True
-
-# 融合类型：
-#   - "none"              -> 不做跨模态融合
-#   - "uv_queries_white"  -> 启用 UV<-White 单向 cross-attention
 FUSION_TYPE = "uv_queries_white"
-
-# 融合层数。当前最小可行基线通常保持为 1。
 FUSION_NUM_LAYERS = 1
 
-# 融合层（fusion_layers）使用与 decoder 相同的基础学习率 LR（1e-4）。
-# populate_args 将 fusion_layers 归入"other params"组，自动继承 LR，无需额外倍增。
-
-# 如需从历史 checkpoint 续训，可在这里指定路径。
-# 注意：cross_modal.py 加入 alpha_attn/alpha_ffn Zero-Init 参数后，
-# 旧 checkpoint 缺少这两个键，需要从头训练（不可续旧 checkpoint）。
+# Resume
 RESUME = ""
 
-# ---------- 训练超参数 ----------
-EPOCHS = 120
-BATCH_SIZE = 2
-GRAD_ACCUM_STEPS = 4
-LR = 1e-4
-LR_ENCODER = 1.5e-4
+# Training
+EPOCHS = 160
+BATCH_SIZE = 6
+GRAD_ACCUM_STEPS = 2
+LR = 1.2e-4
+LR_ENCODER = 1.8e-4
 WEIGHT_DECAY = 1e-4
 CLIP_MAX_NORM = 0.1
 
-# ---------- 正则化相关 ----------
+# Regularization
 DROPOUT = 0.1
 DROP_PATH = 0.1
 
-# ---------- 训练策略 ----------
+# Strategy
 USE_EMA = True
-MULTI_SCALE = False
+MULTI_SCALE = True
 LR_SCHEDULER = "cosine"
-WARMUP_EPOCHS = 1
+WARMUP_EPOCHS = 3
 LR_MIN_FACTOR = 0.0
 RESUME_LOAD_LR_SCHEDULER = False
+SQUARE_RESIZE_DIV_64 = True
 
-# ---------- 评估 / 系统配置 ----------
+# Runtime
 EVAL_MAX_DETS = 500
 RUN_TEST = False
-NUM_WORKERS = 0
+NUM_WORKERS = 4
 DEVICE = "cuda"
 
-# ---------- 输出目录 ----------
-OUTPUT_BASE_DIR = "output/train"
+# Output
+OUTPUT_BASE_DIRS = {
+    "dual_uv_white": "output/train",
+    "uv_only": "output/train_uv",
+}
 
 
-# ========== 第三部分：辅助函数 ==========
+# ========== 第三部分：模式解析 ==========
+def _resolve_mode_settings(modality_mode: str) -> dict[str, Any]:
+    """
+    把模式名解析成训练主流程真正需要的一组开关。
 
-def _find_latest_valid_resume_checkpoint():
-    """自动扫描 OUTPUT_BASE_DIR，找到 epoch 最大的有效 checkpoint 文件路径。"""
-    import torch
-
-    base_dir = Path(OUTPUT_BASE_DIR)
-    if not base_dir.exists():
-        return ""
-
-    # 先按目录的最后修改时间排序，找到最新的训练目录，
-    # 再在该目录内选 epoch 最大的 checkpoint。
-    # 这样可以避免跨目录比较 epoch 而误选旧训练目录的问题。
-    train_dirs = sorted(
-        [p for p in base_dir.iterdir() if p.is_dir()],
-        key=lambda d: d.stat().st_mtime,
-        reverse=True,
-    )
-
-    for train_dir in train_dirs:
-        dir_checkpoints = sorted(
-            train_dir.glob("checkpoint*.pth"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
+    这里不直接把 `DUAL_MODAL`、`USE_WHITE` 等常量散落在多个脚本里，
+    是为了让 UV-only 与双模态只在入口层做一次分流，避免参数漂移。
+    """
+    if modality_mode not in SUPPORTED_MODALITY_MODES:
+        raise ValueError(
+            f"Unsupported modality mode '{modality_mode}'. "
+            f"Expected one of {sorted(SUPPORTED_MODALITY_MODES)}."
         )
-        best_path = ""
-        best_epoch = -1
-        for checkpoint_path in dir_checkpoints:
-            try:
-                checkpoint = torch.load(str(checkpoint_path), map_location="cpu", weights_only=False)
-            except Exception:
-                continue
-            epoch = int(checkpoint.get("epoch", -1))
-            if epoch > best_epoch:
-                best_epoch = epoch
-                best_path = str(checkpoint_path)
-        if best_path:
-            return best_path
 
-    return ""
+    if modality_mode == "uv_only":
+        return {
+            "dual_modal": False,
+            "use_white": False,
+            "fusion_type": "none",
+            "output_base_dir": OUTPUT_BASE_DIRS["uv_only"],
+            "log_prefix": "[Train-UV]",
+        }
+
+    return {
+        "dual_modal": True,
+        "use_white": USE_WHITE,
+        "fusion_type": FUSION_TYPE,
+        "output_base_dir": OUTPUT_BASE_DIRS["dual_uv_white"],
+        "log_prefix": "[Train]",
+    }
 
 
-# ========== 第四部分：训练启动主流程 ==========
-if __name__ == "__main__":
+# ========== 第四部分：训练主流程 ==========
+def run_training(
+    modality_mode: str | None = None,
+    output_base_dir: str | None = None,
+    log_prefix: str | None = None,
+):
+    """按指定模式启动训练，并返回本次运行的输出目录。"""
     from rfdetr.config import RFDETRBaseConfig
     from rfdetr.main import Model
 
-    # ---------- 第一步：确定续训路径与输出目录 ----------
-    resume_path = RESUME
+    resolved_mode = modality_mode or MODALITY_MODE
+    mode_settings = _resolve_mode_settings(resolved_mode)
+    dual_modal = bool(mode_settings["dual_modal"])
+    use_white = bool(mode_settings["use_white"])
+    fusion_type = str(mode_settings["fusion_type"])
+    output_dir_base = output_base_dir or str(mode_settings["output_base_dir"])
+    log_tag = log_prefix or str(mode_settings["log_prefix"])
 
+    if not dual_modal:
+        # UV-only 仍复用 paired dataset 根目录，因此需要在启动前补齐数据与模型兼容补丁。
+        from custom.train.uv_only_support import patch_uv_only_training_support
+
+        patch_uv_only_training_support()
+
+    resume_path = RESUME
     if resume_path:
         output_dir = str(Path(resume_path).parent)
-        print(f"[Train] Resume from: {resume_path}")
-        print(f"[Train] Continue writing to: {output_dir}")
+        print(f"{log_tag} Resume from: {resume_path}")
+        print(f"{log_tag} Continue writing to: {output_dir}")
     else:
         timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-        output_dir = os.path.join(OUTPUT_BASE_DIR, timestamp)
+        output_dir = os.path.join(output_dir_base, timestamp)
         os.makedirs(output_dir, exist_ok=True)
-        print(f"[Train] Output dir: {output_dir}")
+        print(f"{log_tag} Output dir: {output_dir}")
 
-    # ---------- 第二步：准备模型配置 ----------
-    # 这里使用 RF-DETR 的配置类来构建一个基础模型配置，
-    # 再额外注入当前双模态实验所需的 fusion 开关。
+    # 先用 RF-DETR 自带配置类产出基础模型参数，再补上 custom 模态开关，
+    # 可以减少和上游 `RFDETRBaseConfig` 的重复维护。
     model_cfg = RFDETRBaseConfig(
         num_classes=NUM_CLASSES,
         pretrain_weights=PRETRAIN_WEIGHTS,
-        use_white=USE_WHITE,
-        fusion_type=FUSION_TYPE,
+        use_white=use_white,
+        fusion_type=fusion_type,
         fusion_num_layers=FUSION_NUM_LAYERS,
     )
     model_kwargs = model_cfg.model_dump()
-    model_kwargs["dual_modal"] = DUAL_MODAL
+    model_kwargs["dual_modal"] = dual_modal
 
-    # ---------- 第三步：实例化模型 ----------
     model = Model(**model_kwargs)
-
-    # RF-DETR 的训练回调是一个按事件名组织的字典。
     callbacks = defaultdict(list)
 
-    # ---------- 第四步：组织训练参数 ----------
-    # 这里的思路是：
-    #   - 手动写出当前实验最关心的参数
-    #   - 其余结构性参数从 model_kwargs 自动透传
     train_kwargs = {
         "callbacks": callbacks,
         "dataset_dir": DATASET_DIR,
         "dataset_file": "roboflow",
         "num_classes": NUM_CLASSES,
         "class_names": CLASS_NAMES,
-        "dual_modal": DUAL_MODAL,
-        "use_white": USE_WHITE,
-        "fusion_type": FUSION_TYPE,
+        "dual_modal": dual_modal,
+        "use_white": use_white,
+        "fusion_type": fusion_type,
         "fusion_num_layers": FUSION_NUM_LAYERS,
         "epochs": EPOCHS,
         "batch_size": BATCH_SIZE,
@@ -215,10 +197,11 @@ if __name__ == "__main__":
         "segmentation_head": False,
         "mask_downsample_ratio": 4,
         "output_dir": output_dir,
+        "square_resize_div_64": SQUARE_RESIZE_DIV_64,
     }
 
-    # ---------- 第五步：把模型结构参数透传给训练入口 ----------
-    # 这样可以避免重复手写 hidden_dim / resolution / patch_size 等参数。
+    # 训练入口需要的通用参数手工列出；其余模型结构参数从 config 透传，
+    # 这样后续如果上游配置类新增字段，这里通常不需要同步手改第二遍。
     exclude_keys = {
         "num_classes",
         "pretrain_weights",
@@ -232,20 +215,21 @@ if __name__ == "__main__":
         if key not in exclude_keys and key not in train_kwargs:
             train_kwargs[key] = value
 
-    # ---------- 第六步：可选续训 ----------
     if resume_path:
         train_kwargs["resume"] = resume_path
-    elif RESUME:
-        train_kwargs["resume"] = RESUME
 
-    # ---------- 第七步：打印实验摘要 ----------
     effective_batch = BATCH_SIZE * GRAD_ACCUM_STEPS
     print(
-        f"[Train] epochs={EPOCHS}, batch={BATCH_SIZE}x{GRAD_ACCUM_STEPS}={effective_batch}, "
-        f"lr={LR}, scheduler={LR_SCHEDULER}, resume={bool(RESUME)}, "
-        f"dual_modal={DUAL_MODAL}, use_white={USE_WHITE}, fusion_type={FUSION_TYPE}"
+        f"{log_tag} mode={resolved_mode}, epochs={EPOCHS}, "
+        f"batch={BATCH_SIZE}x{GRAD_ACCUM_STEPS}={effective_batch}, "
+        f"lr={LR}, scheduler={LR_SCHEDULER}, resume={bool(resume_path)}, "
+        f"dual_modal={dual_modal}, use_white={use_white}, fusion_type={fusion_type}"
     )
 
-    # ---------- 第八步：正式启动训练 ----------
     model.train(**train_kwargs)
-    print(f"[Train] Done. Outputs saved to: {output_dir}")
+    print(f"{log_tag} Done. Outputs saved to: {output_dir}")
+    return output_dir
+
+
+if __name__ == "__main__":
+    run_training()
