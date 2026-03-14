@@ -30,7 +30,16 @@ from typing import Dict, List, Optional, Tuple
 import torch
 import yaml
 from PIL import Image
+from pycocotools.coco import COCO
 from torchvision.datasets import VisionDataset
+
+from custom.dataset_auto_coco import resolve_roboflow_coco_dataset_dir
+from custom.dataset_layout import (
+    is_probable_uv_image,
+    list_image_files,
+    resolve_split_layout,
+    resolve_white_path_for_uv,
+)
 
 
 # ========== 第二部分：YOLO 标签解析与类别名读取工具 ==========
@@ -153,34 +162,39 @@ class DualModalYoloDetection(VisionDataset):
         else:
             self.classes = load_class_names(str(yaml_path))
 
+        self.coco_root = resolve_roboflow_coco_dataset_dir(
+            dataset_dir=self.dataset_dir,
+            class_names=self.classes,
+            log_prefix="[Dataset-Dual]",
+        )
+        self._coco_image_id_by_path: Dict[str, int] = {}
+
         # ---------- 第二步：扫描成对样本 ----------
-        uv_dir = self.dataset_dir / "images" / split
-        white_dir = self.dataset_dir / "images_white" / split
-        label_dir = self.dataset_dir / "labels" / split
+        layout = resolve_split_layout(
+            dataset_dir=self.dataset_dir,
+            split=split,
+            require_white=True,
+            require_labels=True,
+        )
+        uv_dir = layout.uv_dir
+        white_dir = layout.white_dir
+        label_dir = layout.label_dir
 
         self.pairs: List[Dict[str, str]] = []
 
         # 遍历 UV 图像目录，以 UV 文件名为主索引 White 图像与标签。
-        for filename in sorted(os.listdir(uv_dir)):
-            if not filename.endswith((".bmp", ".png", ".jpg", ".jpeg")):
+        for image_path in list_image_files(uv_dir):
+            if not is_probable_uv_image(image_path):
                 continue
 
-            # 例如：
-            #   pair_0001_uv.bmp -> stem = pair_0001_uv -> pair_prefix = pair_0001
-            stem = Path(filename).stem
-            pair_prefix = stem.replace("_uv", "")
-
-            white_filename = pair_prefix + "_white" + Path(filename).suffix
-            white_path = white_dir / white_filename
-
-            label_filename = stem + ".txt"
-            label_path = label_dir / label_filename
+            white_path = resolve_white_path_for_uv(image_path, white_dir)
+            label_path = label_dir / f"{image_path.stem}.txt"
 
             # 只有同时存在配对 White 图像时，才认为这是一个有效样本。
-            if white_path.exists():
+            if white_path is not None and white_path.exists():
                 self.pairs.append(
                     {
-                        "uv": str(uv_dir / filename),
+                        "uv": str(image_path),
                         "white": str(white_path),
                         "label": str(label_path),
                     }
@@ -197,6 +211,11 @@ class DualModalYoloDetection(VisionDataset):
 
         # 提前构建 COCO 兼容 API，方便直接接入 RF-DETR 现有评估流程。
         self.coco = self._build_coco_api()
+        if self._coco_image_id_by_path:
+            self.ids = [
+                self._coco_image_id_by_path.get(str(Path(pair["uv"]).resolve()), idx)
+                for idx, pair in enumerate(self.pairs)
+            ]
 
     def __len__(self) -> int:
         """返回数据集样本数。"""
@@ -221,7 +240,13 @@ class DualModalYoloDetection(VisionDataset):
         # ---------- 第二步：读取 UV 标注 ----------
         # 因为标注定义在 UV 图像上，所以宽高也使用 UV 图像尺寸。
         width, height = img_uv.size
-        boxes, classes = parse_yolo_label(pair["label"], width, height)
+        image_id_value = self._coco_image_id_by_path.get(str(Path(pair["uv"]).resolve()), idx)
+        boxes, classes = self._load_boxes_and_classes(
+            label_path=pair["label"],
+            image_id=image_id_value,
+            width=width,
+            height=height,
+        )
 
         # ---------- 第三步：对框做基本清洗 ----------
         # 先 clamp 到图像边界内，再过滤无效框。
@@ -240,7 +265,7 @@ class DualModalYoloDetection(VisionDataset):
         target = {
             "boxes": boxes,
             "labels": classes,
-            "image_id": torch.tensor([idx]),
+            "image_id": torch.tensor([image_id_value]),
             "area": area,
             "iscrowd": iscrowd,
             "orig_size": torch.as_tensor([int(height), int(width)]),
@@ -253,14 +278,70 @@ class DualModalYoloDetection(VisionDataset):
 
         return img_uv, img_white, target
 
+    def _load_boxes_and_classes(
+        self,
+        label_path: str,
+        image_id: int,
+        width: int,
+        height: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if self._coco_image_id_by_path:
+            ann_ids = self.coco.getAnnIds(imgIds=[image_id])
+            annotations = self.coco.loadAnns(ann_ids)
+            if len(annotations) == 0:
+                return (
+                    torch.zeros((0, 4), dtype=torch.float32),
+                    torch.zeros((0,), dtype=torch.int64),
+                )
+
+            boxes: List[List[float]] = []
+            classes: List[int] = []
+            for annotation in annotations:
+                x1, y1, box_w, box_h = annotation["bbox"]
+                boxes.append([x1, y1, x1 + box_w, y1 + box_h])
+                classes.append(int(annotation["category_id"]))
+
+            return torch.tensor(boxes, dtype=torch.float32), torch.tensor(
+                classes, dtype=torch.int64
+            )
+
+        return parse_yolo_label(label_path, width, height)
+
     def _build_coco_api(self):
         """
-        构建一个最小可用的 COCO 兼容接口对象。
+        优先复用真实 COCO 标注；若不存在，再回退到本地构造的兼容接口。
 
         RF-DETR 的评估流程依赖 COCO API 风格的数据访问接口，
-        这里用一个轻量自定义实现来避免强依赖真实 COCO 标注文件。
+        这里优先使用自动检测/生成出的 COCO 标注，以保证单模态与双模态评估口径一致。
         """
+        annotation_path = self._resolve_coco_annotation_file()
+        if annotation_path is not None and annotation_path.exists():
+            coco = COCO(str(annotation_path))
+            self._coco_image_id_by_path = {
+                self._normalize_coco_image_path(image["file_name"]): int(image["id"])
+                for image in coco.dataset.get("images", [])
+            }
+            return coco
+
+        self._coco_image_id_by_path = {}
         return _DualCocoLikeAPI(self.classes, self.pairs)
+
+    def _resolve_coco_annotation_file(self) -> Optional[Path]:
+        split_to_dir = {"train": "train", "val": "valid", "test": "test"}
+        coco_split = split_to_dir.get(self.split, self.split)
+        annotation_path = self.coco_root / coco_split / "_annotations.coco.json"
+        if annotation_path.exists():
+            return annotation_path
+        return None
+
+    def _normalize_coco_image_path(self, file_name: str) -> str:
+        image_path = Path(file_name)
+        if image_path.is_absolute():
+            return str(image_path.resolve())
+
+        split_to_dir = {"train": "train", "val": "valid", "test": "test"}
+        coco_split = split_to_dir.get(self.split, self.split)
+        return str((self.coco_root / coco_split / image_path).resolve())
 
 
 # ========== 第四部分：供 CocoEvaluator 使用的 COCO 兼容接口 ==========

@@ -19,6 +19,7 @@ from PIL import Image
 from torchvision.datasets import VisionDataset
 
 from custom.dual_dataset import load_class_names, parse_yolo_label
+from custom.dataset_layout import is_probable_uv_image, list_image_files, resolve_split_layout
 from rfdetr.datasets.coco import make_coco_transforms_square_div_64
 
 
@@ -44,22 +45,24 @@ class UVYoloDetection(VisionDataset):
         else:
             self.classes = load_class_names(str(yaml_path))
 
-        uv_dir = self.dataset_dir / "images" / split
-        label_dir = self.dataset_dir / "labels" / split
+        layout = resolve_split_layout(
+            dataset_dir=self.dataset_dir,
+            split=split,
+            require_white=False,
+            require_labels=True,
+        )
+        uv_dir = layout.uv_dir
+        label_dir = layout.label_dir
 
         self.samples: List[Dict[str, str]] = []
-        for filename in sorted(os.listdir(uv_dir)):
-            if not filename.endswith((".bmp", ".png", ".jpg", ".jpeg")):
-                continue
-
-            stem = Path(filename).stem
-            if not stem.endswith("_uv"):
+        for image_path in list_image_files(uv_dir):
+            if not is_probable_uv_image(image_path):
                 continue
 
             self.samples.append(
                 {
-                    "uv": str(uv_dir / filename),
-                    "label": str(label_dir / f"{stem}.txt"),
+                    "uv": str(image_path),
+                    "label": str(label_dir / f"{image_path.stem}.txt"),
                 }
             )
 

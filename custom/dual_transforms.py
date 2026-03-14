@@ -33,11 +33,8 @@
     6. DualGaussianNoise                p=0.2，std 0.003~0.012
        UV 与 White 分别独立加噪（UV 噪声上限额外 ×1.5）。
 
-  双模态关系增强：
-    7. DualRandomMisalignment           p=0.15，max_shift=2px
-       仅对 White 做轻微平移，模拟双模态配准误差。
   最终后处理：
-    8. DualToTensor + DualNormalize
+    7. DualToTensor + DualNormalize
        转张量并以 ImageNet 均值/方差标准化；框转为归一化 cxcywh。
 
 
@@ -53,7 +50,7 @@
   - 所有 transform 的输入输出签名统一为：
         `(img_uv, img_white, target) -> (img_uv, img_white, target)`
   - 所有边界框变换都以 UV 图像为基准，因为标注来源于 UV。
-  - White 是辅助模态，因此允许做轻微错位、分支 dropout 等更贴近采集误差的扰动。
+  - White 是辅助模态，因此允许做分支 dropout 等更贴近采集误差的扰动。
 """
 
 # ========== 第一部分：导入依赖 ==========
@@ -445,34 +442,6 @@ class DualGaussianNoise:
         return PIL.Image.fromarray((arr * 255.0).astype(np.uint8))
 
 
-class DualRandomMisalignment:
-    """
-    仅对白光图像施加轻微平移，用于模拟双模态采集时的配准误差。
-
-    这是一个非常贴近真实场景的增强：
-      - UV 图像仍保持为标注基准
-      - White 图像允许出现少量相对位移
-    """
-
-    def __init__(self, max_shift: int = 2, p: float = 0.15):
-        self.max_shift = max_shift
-        self.p = p
-
-    def __call__(self, img_uv, img_white, target):
-        if random.random() < self.p:
-            dx = random.randint(-self.max_shift, self.max_shift)
-            dy = random.randint(-self.max_shift, self.max_shift)
-
-            img_white = F.affine(
-                img_white,
-                angle=0,
-                translate=(dx, dy),
-                scale=1.0,
-                shear=0,
-            )
-        return img_uv, img_white, target
-
-
 # ========== 第五部分：张量化与归一化 ==========
 class DualToTensor:
     """将两路 PIL 图像同时转为张量。"""
@@ -590,8 +559,6 @@ def make_dual_transforms(
                 ),
                 DualGaussianBlur(kernel_sizes=[3], p=0.08),
                 DualGaussianNoise(std_range=(0.003, 0.012), p=0.2),
-                # ---------- 双模态关系增强 ----------
-                DualRandomMisalignment(max_shift=2, p=0.15),
                 # ---------- 最终张量化 ----------
                 normalize,
             ]

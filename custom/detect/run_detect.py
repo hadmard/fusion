@@ -37,6 +37,13 @@ import torch
 import torchvision.transforms.functional as TF
 from PIL import Image, ImageDraw
 
+from custom.dataset_layout import (
+    is_probable_uv_image,
+    list_image_files,
+    resolve_split_layout,
+    resolve_white_path_for_uv,
+)
+
 # 将项目根目录加入路径，保证脚本运行时能正确导入 `custom/` 和 `rfdetr/`。
 _PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if _PROJECT_ROOT not in sys.path:
@@ -59,6 +66,7 @@ FUSION_NUM_LAYERS = 1
 NUM_CLASSES = 3
 CLASS_NAMES = ["NPML", "PML", "PM"]
 DETECT_DATASET_DIR = "detect_datasets"
+DETECT_SPLIT = "test"
 
 # ---------- 后处理阈值 ----------
 CONFIDENCE_THRESHOLD = 0.50
@@ -221,28 +229,14 @@ def _filter_with_threshold_and_nms(
 
 # ========== 第四部分：模型加载与单样本推理 ==========
 def _resolve_white_path(uv_path: str) -> str | None:
-    """
-    根据 UV 文件名推断配对 White 文件路径。
-
-    优先尝试：
-        `pair_xxxx_uv.ext -> pair_xxxx_white.ext`
-    若失败，再尝试直接同名。
-    """
+    """兼容新旧目录结构，根据 UV 文件路径找到对应 white 图。"""
     uv_path_obj = Path(uv_path)
-    stem = uv_path_obj.stem
-    if not stem.endswith("_uv"):
-        return None
 
-    candidate_names = [
-        f"{stem[:-3]}_white{uv_path_obj.suffix}",
-        f"{stem[:-3]}white{uv_path_obj.suffix}",
-    ]
-
-    for white_filename in candidate_names:
-        white_path = uv_path_obj.with_name(white_filename)
-        if white_path.exists():
+    sibling_m_dir = uv_path_obj.parent.with_name(f"{uv_path_obj.parent.name}_m")
+    for white_dir in [uv_path_obj.parent, sibling_m_dir]:
+        white_path = resolve_white_path_for_uv(uv_path_obj, white_dir if white_dir.exists() else None)
+        if white_path is not None:
             return str(white_path)
-
     return None
 
 
@@ -454,11 +448,29 @@ if __name__ == "__main__":
     print("[Detect] Model loaded.")
 
     # ---------- 第三步：收集 UV 图像列表 ----------
-    uv_files = sorted(glob.glob(os.path.join(DETECT_DATASET_DIR, "*_uv.bmp")))
+    detect_root = Path(DETECT_DATASET_DIR)
+    if list_image_files(detect_root):
+        uv_files = [
+            str(image_path)
+            for image_path in list_image_files(detect_root)
+            if is_probable_uv_image(image_path)
+        ]
+    else:
+        layout = resolve_split_layout(
+            dataset_dir=detect_root,
+            split=DETECT_SPLIT,
+            require_white=USE_WHITE and FUSION_TYPE != "none",
+            require_labels=False,
+        )
+        uv_files = [
+            str(image_path)
+            for image_path in list_image_files(layout.uv_dir)
+            if is_probable_uv_image(image_path)
+        ]
 
     if not uv_files:
         print(f"[Detect] No UV images found in: {DETECT_DATASET_DIR}")
-        print("[Detect] Expected files like: any_name_uv.bmp / any_name_white.bmp")
+        print("[Detect] Expected either a direct UV image folder, or a dataset root with test/test_m style subdirs.")
         sys.exit(1)
 
     all_results = []

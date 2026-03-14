@@ -80,6 +80,11 @@ datasets/
 
 UV 图与白光图以文件名中的序号配对（`pair_xxxx`）。
 
+训练时会自动检查 COCO 标注：
+- 如果数据根目录已经有 `train/_annotations.coco.json` 和 `valid/_annotations.coco.json`，则直接复用。
+- 否则会基于当前 `images/ + images_white/ + labels/ + dataset_dual.yaml` 目录自动生成一份缓存到 `datasets/_auto_coco/`。
+- `uv_only` 会直接走原始 RF-DETR 的 COCO loader；`dual` 会复用同一份 COCO 标注来对齐 `image_id` 和评估。
+
 ---
 
 ## 训练
@@ -140,8 +145,7 @@ python custom/detect/run_detect.py
 | 4 | `DualUVFluorescenceJitter` p=0.4 | 仅对 UV 做荧光强度/gamma 扰动 |
 | 5 | `DualGaussianBlur` p=0.08 | 两路独立高斯模糊 |
 | 6 | `DualGaussianNoise` p=0.2 | 两路独立高斯噪声 |
-| 7 | `DualRandomMisalignment` p=0.15 | 白光轻微平移（±2px），模拟配准误差 |
-| 8 | Normalize | ImageNet 均值/方差标准化 |
+| 7 | Normalize | ImageNet 均值/方差标准化 |
 
 ---
 
