@@ -8,7 +8,7 @@
 文件说明：定义模块，初始化init
 
 子模块职责：
-  - custom.cross_modal：定义 UV 主模态读取 White 辅助模态信息的跨模态融合模块。
+  - custom.cross_modal：跨模态融合模块。
   - custom.dual_model：在 RF-DETR 主干上接入双模态前向流程与融合逻辑。
   - custom.dual_dataset：实现成对 UV/White 数据集读取与 COCO 兼容评估接口。
   - custom.dual_transforms：实现双模态同步增强，保证框始终以 UV 标注为准。

@@ -17,12 +17,6 @@
   第五部分：多层堆叠封装 CrossModalFusionStack
   第六部分：兼容旧命名的别名
 
-设计原则：
-  - uv当作query，white当作key/value，保持单向读取关系，确保检测语义始终在UV分支上。
-  - 单层块只负责 z_i = Attn(q=h_i, k=white, v=white)。
-  - 多层时不再使用单层标量门控，而是让 stack 在深度维度上对前序层输出做 attention 聚合。
-  - FFN 只在 stack 最后执行一次，用来对最终聚合结果做一次表征重组。
-  - 当前 DualModalLWDETR 的实际接入点在 encoder 后、projector 前。
 """
 
 # ========== 第一部分：导入依赖 ==========

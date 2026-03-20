@@ -1,9 +1,3 @@
-# ------------------------------------------------------------------------
-# RF-DETR
-# Copyright (c) 2025 Roboflow. All Rights Reserved.
-# Licensed under the Apache License, Version 2.0 [see LICENSE for details]
-# ------------------------------------------------------------------------
-
 """
 文件说明：本文件定义 UV/White 双模态训练与验证阶段的数据增强。
 功能：在保证 UV 主模态语义始终清晰的前提下，对 UV 与 White 图像执行同步几何增强、
@@ -22,7 +16,7 @@
                scale 0.65~0.95，最少保留 4 框含 1 个 PM）
               → DualSquareResize — 裁剪后再缩放到目标分辨率
 
-  外观增强（模态特异）：
+  外观增强：
     3. DualWhiteLightJitter             p=0.35
        仅作用于 White，亮度/对比度各 ±12%，饱和度 ±6%。
     4. DualUVFluorescenceJitter         p=0.4
