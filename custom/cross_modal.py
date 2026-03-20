@@ -1,21 +1,16 @@
-# ------------------------------------------------------------------------
-# RF-DETR
-# Copyright (c) 2025 Roboflow. All Rights Reserved.
-# Licensed under the Apache License, Version 2.0 [see LICENSE for details]
-# ------------------------------------------------------------------------
 
 """
-文件说明：本文件定义当前项目使用的最小可行跨模态融合模块。
+文件说明：思路模块文件
 功能：在“UV 为主模态、White 为辅助模态”的前提下，实现单向的 UV<-White cross-attention，
       并在多层融合时使用论文式的深度 attention residual 聚合。
 
 结构概览：
   第一部分：导入依赖
   第二部分：通用张量工具
-  第三部分：单层跨模态注意力块 CrossModalFusionBlock
+  第三部分：设计一层的单层跨模态注意力块 CrossModalFusionBlock
   第四部分：深度 attention residual 聚合
   第五部分：多层堆叠封装 CrossModalFusionStack
-  第六部分：兼容旧命名的别名
+  第六部分：做兼容
 
 """
 

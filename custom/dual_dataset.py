@@ -1,8 +1,3 @@
-# ------------------------------------------------------------------------
-# RF-DETR
-# Copyright (c) 2025 Roboflow. All Rights Reserved.
-# Licensed under the Apache License, Version 2.0 [see LICENSE for details]
-# ------------------------------------------------------------------------
 
 """
 文件说明：本文件实现当前项目使用的双模态成对检测数据集。

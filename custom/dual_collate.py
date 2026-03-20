@@ -1,8 +1,3 @@
-# ------------------------------------------------------------------------
-# RF-DETR
-# Copyright (c) 2025 Roboflow. All Rights Reserved.
-# Licensed under the Apache License, Version 2.0 [see LICENSE for details]
-# ------------------------------------------------------------------------
 
 """
 文件说明：本文件实现双模态数据在 DataLoader 中的 collate_fn。
