@@ -67,7 +67,7 @@ def main() -> None:
         dual_modal=True,
         use_white=True,
         fusion_type="uv_queries_white",
-        fusion_num_layers=1,
+        fusion_num_layers=6,
         pretrain_weights=None,
         eval_max_dets=500,
         segmentation_head=False,
@@ -86,7 +86,7 @@ def main() -> None:
         pretrain_weights=str(checkpoint_path),
         use_white=True,
         fusion_type="uv_queries_white",
-        fusion_num_layers=1,
+        fusion_num_layers=6,
     )
     model_kwargs = model_cfg.model_dump()
     model_kwargs["dual_modal"] = True

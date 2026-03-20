@@ -65,9 +65,157 @@ import torchvision.transforms as TT
 import torchvision.transforms.functional as F
 
 from rfdetr.datasets.coco import compute_multi_scale_scales
-from rfdetr.datasets.transforms import crop, hflip, resize
 from rfdetr.util.box_ops import box_xyxy_to_cxcywh
 from rfdetr.util.misc import interpolate
+
+
+def _normalize_resize_size(
+    image_size: Tuple[int, int],
+    size,
+    max_size: Optional[int] = None,
+) -> Tuple[int, int]:
+    """
+    兼容旧版 DETR 风格的 resize 入口。
+
+    为什么把兼容逻辑留在 custom：
+    - 训练链路当前仍依赖旧版 dual transforms 的函数签名；
+    - `src/rfdetr` 已切换到新的 transforms 体系，不再暴露旧 helper；
+    - 把这层适配局部化，能避免把兼容代码反向塞回主库。
+    """
+    if isinstance(size, (list, tuple)):
+        if len(size) != 2:
+            raise ValueError(f"resize size 必须是长度为 2 的序列，当前得到: {size}")
+        return int(size[0]), int(size[1])
+
+    width, height = image_size
+    short_side = int(size)
+
+    if max_size is not None:
+        min_original = float(min(width, height))
+        max_original = float(max(width, height))
+        if max_original / max(min_original, 1.0) * short_side > max_size:
+            short_side = int(round(max_size * min_original / max(max_original, 1.0)))
+
+    if width <= height:
+        new_width = short_side
+        new_height = int(round(short_side * height / max(width, 1)))
+    else:
+        new_height = short_side
+        new_width = int(round(short_side * width / max(height, 1)))
+
+    return new_height, new_width
+
+
+def hflip(image, target):
+    """对 UV 图像做水平翻转，并同步更新 target 中的几何字段。"""
+    flipped_image = F.hflip(image)
+
+    if target is None:
+        return flipped_image, None
+
+    target = target.copy()
+    width, _ = image.size
+
+    if "boxes" in target:
+        boxes = target["boxes"].clone()
+        x_min = boxes[:, 0].clone()
+        x_max = boxes[:, 2].clone()
+        boxes[:, 0] = width - x_max
+        boxes[:, 2] = width - x_min
+        target["boxes"] = boxes
+
+    if "masks" in target:
+        target["masks"] = target["masks"].flip(-1)
+
+    return flipped_image, target
+
+
+def crop(image, target, region):
+    """对 UV 图像做裁剪，并把 boxes/area/masks 同步到裁剪后的坐标系。"""
+    top, left, height, width = region
+    cropped_image = F.crop(image, top, left, height, width)
+
+    if target is None:
+        return cropped_image, None
+
+    target = target.copy()
+    target["size"] = torch.as_tensor([int(height), int(width)])
+
+    fields = ["labels", "area", "iscrowd"]
+
+    if "boxes" in target:
+        boxes = target["boxes"]
+        offset = torch.as_tensor(
+            [left, top, left, top],
+            dtype=boxes.dtype,
+            device=boxes.device,
+        )
+        max_xy = torch.as_tensor(
+            [width, height],
+            dtype=boxes.dtype,
+            device=boxes.device,
+        )
+
+        cropped_boxes = boxes - offset
+        cropped_boxes = torch.min(cropped_boxes.reshape(-1, 2, 2), max_xy)
+        cropped_boxes = cropped_boxes.clamp(min=0)
+
+        target["boxes"] = cropped_boxes.reshape(-1, 4)
+        target["area"] = (cropped_boxes[:, 1, :] - cropped_boxes[:, 0, :]).prod(dim=1)
+        fields.append("boxes")
+
+    if "masks" in target:
+        target["masks"] = target["masks"][:, top : top + height, left : left + width]
+        fields.append("masks")
+
+    if "boxes" in target or "masks" in target:
+        if "boxes" in target:
+            reshaped_boxes = target["boxes"].reshape(-1, 2, 2)
+            keep = torch.all(reshaped_boxes[:, 1, :] > reshaped_boxes[:, 0, :], dim=1)
+        else:
+            keep = target["masks"].flatten(1).any(1)
+
+        for field in fields:
+            if field in target:
+                target[field] = target[field][keep]
+
+    return cropped_image, target
+
+
+def resize(image, target, size, max_size: Optional[int] = None):
+    """对 UV 图像做按比例 resize，并同步更新几何字段。"""
+    new_height, new_width = _normalize_resize_size(image.size, size, max_size)
+    resized_image = F.resize(image, (new_height, new_width))
+
+    if target is None:
+        return resized_image, None
+
+    target = target.copy()
+    original_width, original_height = image.size
+    ratio_width = new_width / max(original_width, 1)
+    ratio_height = new_height / max(original_height, 1)
+
+    if "boxes" in target:
+        scale = torch.as_tensor(
+            [ratio_width, ratio_height, ratio_width, ratio_height],
+            dtype=target["boxes"].dtype,
+            device=target["boxes"].device,
+        )
+        target["boxes"] = target["boxes"] * scale
+
+    if "area" in target:
+        target["area"] = target["area"] * (ratio_width * ratio_height)
+
+    target["size"] = torch.as_tensor([int(new_height), int(new_width)])
+
+    if "masks" in target:
+        target["masks"] = interpolate(
+            target["masks"][:, None].float(),
+            (new_height, new_width),
+            mode="nearest",
+        )[:, 0] > 0.5
+
+    return resized_image, target
 
 
 # ========== 第二部分：增强实现（可多个） ==========

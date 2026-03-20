@@ -64,7 +64,7 @@ class DualModalLWDETR(LWDETR):
         use_white: bool = True,
         fusion_type: str = "uv_queries_white",
         fusion_num_heads: int = 8,
-        fusion_num_layers: int = 1,
+        fusion_num_layers: int = 6,
     ):
         # 先初始化 RF-DETR 原始主干。
         # 这样可以最大限度复用已有检测头、transformer、two-stage 等逻辑。
