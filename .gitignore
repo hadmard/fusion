@@ -185,28 +185,28 @@ cython_debug/
 rf-detr*
 
 # big
-output/
+/output/
 
 # datasets
-datasets/
-detect_datasets/
+/datasets/
+/detect_datasets/
 
 # temp
-tmp/
-train_test.py
+/tmp/
+/train_test.py
 
 # test
-test_visualizations/
-debugging/
+/test_visualizations/
+/debugging/
 
 # VS Code
-.vscode/
-.vscode/output/
+/.vscode/
+/.vscode/output/
 
 # GitHub
-.github/
+/.github/
 
-custom/papers/
-custom/notes/
+/custom/papers/
+/custom/notes/
 
-AGENTS.md
+/AGENTS.md
