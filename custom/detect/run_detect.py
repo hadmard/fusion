@@ -37,6 +37,10 @@ import torch
 import torchvision.transforms.functional as TF
 from PIL import Image, ImageDraw
 
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
 from custom import prepare_project_environment
 from custom.dataset_layout import (
     is_probable_uv_image,
