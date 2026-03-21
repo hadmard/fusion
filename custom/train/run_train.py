@@ -19,10 +19,15 @@
 from __future__ import annotations
 
 import os
+import sys
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
 from custom import prepare_project_environment
 
@@ -54,8 +59,8 @@ GRAD_ACCUM_STEPS = 1
 MAX_TRAIN_BATCHES = 0
 MAX_VAL_BATCHES = 0
 MAX_TEST_BATCHES = 0
-LR = 1.2e-4
-LR_ENCODER = 1.8e-4
+LR = 1.5e-4
+LR_ENCODER = 2.1e-4
 WEIGHT_DECAY = 1e-4
 CLIP_MAX_NORM = 0.1
 
@@ -67,7 +72,7 @@ DROP_PATH = 0.1
 USE_EMA = True
 MULTI_SCALE = True
 LR_SCHEDULER = "cosine"
-WARMUP_EPOCHS = 3
+WARMUP_EPOCHS = 2
 LR_MIN_FACTOR = 0.0
 RESUME_LOAD_LR_SCHEDULER = False
 SQUARE_RESIZE_DIV_64 = True
@@ -78,6 +83,9 @@ RUN_TEST = False
 # 恢复到正常训练阶段更常用的 worker 数；若本地 spawn 不稳可再手动降回 0。
 NUM_WORKERS = 4
 DEVICE = "cuda"
+PIN_MEMORY = True
+PERSISTENT_WORKERS = True
+PREFETCH_FACTOR = 2
 
 # Output
 OUTPUT_BASE_DIRS = {
@@ -198,6 +206,9 @@ def run_training(
         "resume_load_lr_scheduler": RESUME_LOAD_LR_SCHEDULER,
         "num_workers": NUM_WORKERS,
         "device": DEVICE,
+        "pin_memory": PIN_MEMORY,
+        "persistent_workers": PERSISTENT_WORKERS,
+        "prefetch_factor": PREFETCH_FACTOR,
         "eval_max_dets": EVAL_MAX_DETS,
         "run_test": RUN_TEST,
         "segmentation_head": False,
@@ -229,7 +240,9 @@ def run_training(
         f"{log_tag} mode={resolved_mode}, epochs={EPOCHS}, "
         f"batch={BATCH_SIZE}x{GRAD_ACCUM_STEPS}={effective_batch}, "
         f"max_train_batches={MAX_TRAIN_BATCHES}, max_val_batches={MAX_VAL_BATCHES}, "
-        f"lr={LR}, scheduler={LR_SCHEDULER}, resume={bool(resume_path)}, "
+        f"lr={LR}, scheduler={LR_SCHEDULER}, workers={NUM_WORKERS}, "
+        f"pin_memory={PIN_MEMORY}, persistent_workers={PERSISTENT_WORKERS}, "
+        f"resume={bool(resume_path)}, "
         f"dual_modal={dual_modal}, use_white={use_white}, fusion_type={fusion_type}"
     )
 

@@ -264,6 +264,17 @@ class Model:
         dataset_test = _limit_dataset_for_smoke(dataset_test, max_test_batches, args.batch_size)
 
         sampler_train = torch.utils.data.RandomSampler(dataset_train)
+        loader_kwargs = {"collate_fn": collate_fn, "num_workers": args.num_workers}
+        if args.device == "cuda":
+            loader_kwargs["pin_memory"] = True if args.pin_memory is None else bool(args.pin_memory)
+        elif args.pin_memory is not None:
+            loader_kwargs["pin_memory"] = bool(args.pin_memory)
+        if args.num_workers > 0:
+            if args.persistent_workers is not None:
+                loader_kwargs["persistent_workers"] = bool(args.persistent_workers)
+            if args.prefetch_factor is not None:
+                loader_kwargs["prefetch_factor"] = int(args.prefetch_factor)
+
         sampler_val = torch.utils.data.SequentialSampler(dataset_val)
         sampler_test = torch.utils.data.SequentialSampler(dataset_test)
 
@@ -276,8 +287,7 @@ class Model:
             data_loader_train = DataLoader(
                 dataset_train,
                 batch_sampler=batch_sampler_train,
-                collate_fn=collate_fn,
-                num_workers=args.num_workers,
+                **loader_kwargs,
             )
         elif len(dataset_train) < effective_batch_size * 5:
             sampler = torch.utils.data.RandomSampler(
@@ -288,21 +298,19 @@ class Model:
             data_loader_train = DataLoader(
                 dataset_train,
                 batch_size=effective_batch_size,
-                collate_fn=collate_fn,
-                num_workers=args.num_workers,
                 sampler=sampler,
+                **loader_kwargs,
             )
         else:
             batch_sampler_train = torch.utils.data.BatchSampler(sampler_train, effective_batch_size, drop_last=True)
             data_loader_train = DataLoader(
                 dataset_train,
                 batch_sampler=batch_sampler_train,
-                collate_fn=collate_fn,
-                num_workers=args.num_workers,
+                **loader_kwargs,
             )
 
-        data_loader_val = DataLoader(dataset_val, args.batch_size, sampler=sampler_val, drop_last=False, collate_fn=collate_fn, num_workers=args.num_workers)
-        data_loader_test = DataLoader(dataset_test, args.batch_size, sampler=sampler_test, drop_last=False, collate_fn=collate_fn, num_workers=args.num_workers)
+        data_loader_val = DataLoader(dataset_val, args.batch_size, sampler=sampler_val, drop_last=False, **loader_kwargs)
+        data_loader_test = DataLoader(dataset_test, args.batch_size, sampler=sampler_test, drop_last=False, **loader_kwargs)
 
         base_ds = _resolve_coco_api(dataset_val)
         base_ds_test = _resolve_coco_api(dataset_test)
