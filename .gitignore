@@ -176,9 +176,7 @@ cython_debug/
 # Jetbrain's IDEs
 .idea/
 
-# ========== 项目专属规则 ==========
-
-# 预训练权重 / 模型文件（体积大）
+# pre_train
 *.pth
 *.pt
 *.onnx
@@ -186,18 +184,18 @@ cython_debug/
 *.trt
 rf-detr*
 
-# 训练 & 推理输出
+# big
 output/
 
-# 数据集（不上传）
+# datasets
 datasets/
 detect_datasets/
 
-# 临时脚本 & 分析文件
+# temp
 tmp/
 train_test.py
 
-# 测试产物
+# test
 test_visualizations/
 debugging/
 
@@ -208,5 +206,7 @@ debugging/
 # GitHub
 .github/
 
-# Custom notes
+custom/papers/
 custom/notes/
+
+AGENTS.md

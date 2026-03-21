@@ -38,7 +38,8 @@ White 图像 ─→ DINOv2 Encoder ──→ White 特征 [B,C,H,W] ─┘
 - **主模态**：UV 图像（始终携带检测语义）
 - **辅助模态**：白光图像（作为 cross-attention 的 key/value）
 - **融合位置**：encoder 输出之后、projector 之前
-- **融合机制**：`CrossModalFusionStack`，使用 zero-init 的 `alpha_attn` / `alpha_ffn` 门控，训练初期对预训练权重零干扰
+- **融合机制**：`CrossModalFusionStack`，当前为 6 层的论文式 depth-attention residual 聚合：
+  中间层执行 `Attn(q=h_i, k=white, v=white)`，跨层权重由 depth attention 决定，最终只在 stack 末端执行一次 FFN
 
 ---
 
@@ -50,7 +51,9 @@ custom/
   dual_model.py         # 双模态模型封装（DualModalLWDETR）
   dual_dataset.py       # 双模态数据集（UV + White 配对读取）
   dual_transforms.py    # 双模态数据增强流水线
+  rfdetr_compat.py      # 自定义训练/验证兼容层（对接 src/rfdetr）
   uv_dataset.py         # 单模态 UV-only 数据集（消融基线用）
+  notes/                # 版本记录、实验记录与思路档案
   train/
     run_train.py        # 双模态训练启动脚本
     run_train_uv.py     # UV-only 消融训练启动脚本
@@ -99,7 +102,7 @@ pip install -e .
 ### 双模态训练（UV + White）
 
 ```bash
-python custom/train/run_train.py
+python -m custom.train.run_train
 ```
 
 主要超参数在脚本顶部的**实验参数区**修改：
@@ -108,16 +111,16 @@ python custom/train/run_train.py
 |------|--------|------|
 | `DUAL_MODAL` | `True` | 是否启用双模态 |
 | `FUSION_TYPE` | `"uv_queries_white"` | 融合方式 |
-| `FUSION_NUM_LAYERS` | `1` | 融合层数 |
-| `EPOCHS` | `120` | 训练轮数 |
-| `BATCH_SIZE` | `2` | 批大小 |
-| `GRAD_ACCUM_STEPS` | `4` | 梯度累积步数 |
-| `LR` | `1e-4` | 学习率 |
+| `FUSION_NUM_LAYERS` | `6` | 融合层数 |
+| `EPOCHS` | `160` | 训练轮数 |
+| `BATCH_SIZE` | `6` | 批大小 |
+| `GRAD_ACCUM_STEPS` | `1` | 梯度累积步数 |
+| `LR` | `1.2e-4` | 学习率 |
 
 ### 单模态消融训练（UV-only 基线）
 
 ```bash
-python custom/train/run_train_uv.py
+python -m custom.train.run_train_uv
 ```
 
 ---

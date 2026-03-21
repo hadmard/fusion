@@ -1,11 +1,6 @@
-# ------------------------------------------------------------------------
-# RF-DETR
-# Copyright (c) 2025 Roboflow. All Rights Reserved.
-# Licensed under the Apache License, Version 2.0 [see LICENSE for details]
-# ------------------------------------------------------------------------
 
 """
-文件说明：本文件在 RF-DETR 原始检测模型之上封装双模态版本的主模型。
+文件说明：融合的执行模块，具体思路模块是cross_attn那个文件
 功能：保持 RF-DETR 主体结构不大改的前提下，引入 UV 主模态、White 辅助模态的双输入前向，
       并在 encoder 后、projector 前 插入单向 UV <- White 跨模态融合模块。
 
@@ -64,7 +59,7 @@ class DualModalLWDETR(LWDETR):
         use_white: bool = True,
         fusion_type: str = "uv_queries_white",
         fusion_num_heads: int = 8,
-        fusion_num_layers: int = 1,
+        fusion_num_layers: int = 6,
     ):
         # 先初始化 RF-DETR 原始主干。
         # 这样可以最大限度复用已有检测头、transformer、two-stage 等逻辑。

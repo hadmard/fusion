@@ -37,6 +37,7 @@ import torch
 import torchvision.transforms.functional as TF
 from PIL import Image, ImageDraw
 
+from custom import prepare_project_environment
 from custom.dataset_layout import (
     is_probable_uv_image,
     list_image_files,
@@ -44,13 +45,9 @@ from custom.dataset_layout import (
     resolve_white_path_for_uv,
 )
 
-# 将项目根目录加入路径，保证脚本运行时能正确导入 `custom/` 和 `rfdetr/`。
-_PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-if _PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, _PROJECT_ROOT)
-
-# 切换工作目录，确保相对路径全部以项目根目录为基准。
-os.chdir(_PROJECT_ROOT)
+# 将项目根目录与 `src/` 路径准备逻辑收敛到 custom 包级 helper，
+# 避免 train/detect 多个入口长期各改各的。
+prepare_project_environment(change_cwd=True)
 
 
 # ========== 第二部分：推理配置区 ==========
@@ -60,7 +57,7 @@ CHECKPOINT_PATH = "output/train/2026-03-08_100100/checkpoint_best_total.pth"
 # ---------- 模态与融合配置 ----------
 USE_WHITE = True
 FUSION_TYPE = "uv_queries_white"
-FUSION_NUM_LAYERS = 1
+FUSION_NUM_LAYERS = 6
 
 # ---------- 类别与输入路径 ----------
 NUM_CLASSES = 3
@@ -436,7 +433,12 @@ def _visualize_pair(
 
 
 # ========== 第六部分：主执行流程 ==========
-if __name__ == "__main__":
+def main() -> str:
+    """
+    文件说明：提供推理脚本的统一启动入口。
+    功能说明：把原来直接写在 `__main__` 块里的流程收拢为显式函数，
+    方便后续复用、测试或继续做入口层清理，而不改变推理逻辑本身。
+    """
     # ---------- 第一步：创建输出目录 ----------
     timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
     output_dir = os.path.join(OUTPUT_BASE_DIR, timestamp)
@@ -558,3 +560,8 @@ if __name__ == "__main__":
     print(f"  Skipped:   {skipped}")
     print(f"  Total detections: {total_dets}")
     print(f"  Output dir: {output_dir}")
+    return output_dir
+
+
+if __name__ == "__main__":
+    main()

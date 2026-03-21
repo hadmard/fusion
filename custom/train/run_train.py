@@ -19,17 +19,15 @@
 from __future__ import annotations
 
 import os
-import sys
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from custom import prepare_project_environment
+
 # ========== 第一部分：导入依赖与路径初始化 ==========
-_PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(_PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PROJECT_ROOT))
-os.chdir(_PROJECT_ROOT)
+prepare_project_environment(change_cwd=True)
 
 # ========== 第二部分：实验参数区 ==========
 # Dataset
@@ -43,15 +41,19 @@ MODALITY_MODE = "dual_uv_white"
 SUPPORTED_MODALITY_MODES = {"dual_uv_white", "uv_only"}
 USE_WHITE = True
 FUSION_TYPE = "uv_queries_white"
-FUSION_NUM_LAYERS = 1
+FUSION_NUM_LAYERS = 6
 
 # Resume
 RESUME = ""
 
 # Training
+# 这里恢复正常训练默认值；smoke 阶段的 batch 限制默认关闭。
 EPOCHS = 160
-BATCH_SIZE = 12
+BATCH_SIZE = 6
 GRAD_ACCUM_STEPS = 1
+MAX_TRAIN_BATCHES = 0
+MAX_VAL_BATCHES = 0
+MAX_TEST_BATCHES = 0
 LR = 1.2e-4
 LR_ENCODER = 1.8e-4
 WEIGHT_DECAY = 1e-4
@@ -73,6 +75,7 @@ SQUARE_RESIZE_DIV_64 = True
 # Runtime
 EVAL_MAX_DETS = 500
 RUN_TEST = False
+# 恢复到正常训练阶段更常用的 worker 数；若本地 spawn 不稳可再手动降回 0。
 NUM_WORKERS = 4
 DEVICE = "cuda"
 
@@ -178,6 +181,9 @@ def run_training(
         "epochs": EPOCHS,
         "batch_size": BATCH_SIZE,
         "grad_accum_steps": GRAD_ACCUM_STEPS,
+        "max_train_batches": MAX_TRAIN_BATCHES,
+        "max_val_batches": MAX_VAL_BATCHES,
+        "max_test_batches": MAX_TEST_BATCHES,
         "lr": LR,
         "lr_encoder": LR_ENCODER,
         "weight_decay": WEIGHT_DECAY,
@@ -222,6 +228,7 @@ def run_training(
     print(
         f"{log_tag} mode={resolved_mode}, epochs={EPOCHS}, "
         f"batch={BATCH_SIZE}x{GRAD_ACCUM_STEPS}={effective_batch}, "
+        f"max_train_batches={MAX_TRAIN_BATCHES}, max_val_batches={MAX_VAL_BATCHES}, "
         f"lr={LR}, scheduler={LR_SCHEDULER}, resume={bool(resume_path)}, "
         f"dual_modal={dual_modal}, use_white={use_white}, fusion_type={fusion_type}"
     )
@@ -231,5 +238,14 @@ def run_training(
     return output_dir
 
 
+def main() -> str:
+    """
+    文件说明：提供与 `if __name__ == "__main__"` 解耦的训练脚本入口。
+    功能说明：让模块导入、命令行执行和后续可能的脚本复用都走同一条启动路径，
+    减少入口逻辑散落在文件尾部的情况。
+    """
+    return run_training()
+
+
 if __name__ == "__main__":
-    run_training()
+    main()
