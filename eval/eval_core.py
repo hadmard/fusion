@@ -1,8 +1,16 @@
 """
-文件说明：本文件用于测试仓库根目录的 best 权重在成对测试图片上的推理表现，并输出一份参数报告。
-功能说明：默认读取根目录 `checkpoint_best_ema.pth`，使用 `datasets/test_uv` 与 `datasets/test_white`
-中的同名配对图片做双模态推理，统计模型参数量、模型文件大小、GFLOPs、FPS，
-并保存每张图片的检测结果到 JSON。
+文件说明：本文件是 `eval/` 目录下的内部评估核心，不作为日常直接使用的入口。
+功能说明：负责加载单个权重并在成对测试集上计算统一指标，供 `eval/run_eval_kimi.py` 与 `eval/run_eval_menkong.py` 调用。
+
+使用方式：
+  1. 日常评估请直接运行对应权重的专用脚本：
+     - `conda run -n rfdetr python eval/run_eval_kimi.py`
+     - `conda run -n rfdetr python eval/run_eval_menkong.py`
+  2. 上面两个脚本会各自固定权重，并调用本文件完成真实评估。
+  3. 只有在需要单独调试单个权重时，才建议直接运行本文件，例如：
+     - `conda run -n rfdetr python eval/eval_core.py --checkpoint eval/kimi.pth --uv-dir D:\desktop\fusion--\test_uv --white-dir D:\desktop\fusion--\test_white --label-dir D:\desktop\fusion--\test_label`
+  4. 输出默认写入：
+     - `output/eval/<时间戳>/`
 
 结构概览：
   第一部分：导入依赖与环境准备
@@ -33,7 +41,7 @@ from PIL import Image
 from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
 
-_FILE_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_FILE_PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_FILE_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_FILE_PROJECT_ROOT))
 
@@ -44,7 +52,8 @@ PROJECT_ROOT = prepare_project_environment(change_cwd=True)
 
 from custom.dual_dataset import load_class_names, parse_yolo_label
 from custom.dual_model import build_dual_model
-from custom.rfdetr_compat import populate_args
+from custom.rfdetr_compat import Model, populate_args
+from legacy_gate_model import build_legacy_gate_dual_model
 from rfdetr.evaluation.coco_eval import patched_pycocotools_summarize
 from rfdetr.models.lwdetr import PostProcess
 
@@ -92,7 +101,7 @@ def _parse_args() -> argparse.Namespace:
         "--output-dir",
         type=str,
         default=None,
-        help="结果输出目录；默认写到 output/test_pair_report/<时间戳>。",
+        help="结果输出目录；默认写到 output/eval/<时间戳>。",
     )
     parser.add_argument(
         "--device",
@@ -125,7 +134,7 @@ def _resolve_checkpoint_path(explicit_path: str | None) -> Path:
     """
     解析实际要使用的 checkpoint。
 
-    这里优先根目录的 `checkpoint_best_ema.pth`，因为用户明确说的是“根目录那个 best 权重文件”。
+    这里保留一个兼容性的兜底查找顺序，便于单独调试时少传参数。
     """
     if explicit_path is not None:
         checkpoint_path = Path(explicit_path)
@@ -147,6 +156,15 @@ def _resolve_checkpoint_path(explicit_path: str | None) -> Path:
         "未找到可用的 best checkpoint。已检查："
         + ", ".join(str(candidate) for candidate in candidates)
     )
+
+
+def _resolve_input_dir(path_str: str | None) -> Path | None:
+    if path_str is None:
+        return None
+    path = Path(path_str)
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    return path.resolve()
 
 
 def _build_image_pairs(
@@ -198,7 +216,7 @@ def _resolve_output_dir(output_dir_arg: str | None) -> Path:
         output_dir = Path(output_dir_arg)
     else:
         timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-        output_dir = PROJECT_ROOT / "output" / "test_pair_report" / timestamp
+        output_dir = PROJECT_ROOT / "output" / "eval" / timestamp
     output_dir.mkdir(parents=True, exist_ok=True)
     return output_dir.resolve()
 
@@ -238,41 +256,132 @@ def _load_checkpoint_runtime(
     device: str,
 ) -> tuple[torch.nn.Module, PostProcess, dict[str, Any]]:
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    state_dict = checkpoint.get("model", checkpoint)
     checkpoint_args = checkpoint.get("args")
-
-    checkpoint_num_classes = int(state_dict["class_embed.bias"].shape[0]) - 1
-    class_names = _build_runtime_class_names(checkpoint_args, checkpoint_num_classes)
-
-    runtime_args = populate_args(
-        num_classes=checkpoint_num_classes,
-        class_names=class_names,
-        pretrain_weights=None,
-        resolution=int(_safe_getattr(checkpoint_args, "resolution", 560)),
-        use_white=bool(_safe_getattr(checkpoint_args, "use_white", True)),
-        fusion_type=str(_safe_getattr(checkpoint_args, "fusion_type", "uv_queries_white")),
-        fusion_num_layers=int(_safe_getattr(checkpoint_args, "fusion_num_layers", 1)),
-        device=device,
-        dual_modal=True,
+    fallback_num_classes = int(len(_safe_getattr(checkpoint_args, "class_names", []) or [])) or 3
+    class_names = _load_dataset_class_names(
+        PROJECT_ROOT / "datasets" / "dataset_dual.yaml",
+        fallback_num_classes,
     )
+    dual_modal = bool(
+        _safe_getattr(
+            checkpoint_args,
+            "dual_modal",
+            _safe_getattr(checkpoint_args, "use_white", True),
+        )
+    )
+    use_white = bool(_safe_getattr(checkpoint_args, "use_white", dual_modal))
+    fusion_type = str(_safe_getattr(checkpoint_args, "fusion_type", "none" if not dual_modal else "uv_queries_white"))
+    fusion_num_layers = int(_safe_getattr(checkpoint_args, "fusion_num_layers", 1))
+    resolution = int(_safe_getattr(checkpoint_args, "resolution", 560))
 
-    model = build_dual_model(runtime_args).to(device)
-    model.load_state_dict(state_dict, strict=True)
-    model.eval()
+    legacy_gate = _checkpoint_uses_legacy_gate(checkpoint=checkpoint)
 
-    postprocess = PostProcess(num_select=runtime_args.num_select)
+    if legacy_gate:
+        model, postprocess = _build_legacy_gate_runtime(
+            checkpoint=checkpoint,
+            checkpoint_path=checkpoint_path,
+            class_names=class_names,
+            resolution=resolution,
+            device=device,
+            use_white=use_white,
+            fusion_type=fusion_type,
+            fusion_num_layers=fusion_num_layers,
+        )
+    else:
+        model_wrapper = Model(
+            num_classes=len(class_names),
+            class_names=class_names,
+            pretrain_weights=str(checkpoint_path),
+            resolution=resolution,
+            use_white=use_white,
+            fusion_type=fusion_type,
+            fusion_num_layers=fusion_num_layers,
+            device=device,
+            dual_modal=dual_modal,
+        )
+        model = model_wrapper.model.to(device)
+        model.eval()
+        postprocess = model_wrapper.postprocess
+
 
     runtime_meta = {
         "checkpoint_path": str(checkpoint_path),
-        "resolution": int(runtime_args.resolution),
+        "resolution": resolution,
         "class_names": class_names,
-        "num_classes": int(runtime_args.num_classes),
-        "use_white": bool(runtime_args.use_white),
-        "fusion_type": str(runtime_args.fusion_type),
-        "fusion_num_layers": int(runtime_args.fusion_num_layers),
+        "num_classes": len(class_names),
+        "use_white": use_white,
+        "fusion_type": fusion_type,
+        "fusion_num_layers": fusion_num_layers,
+        "dual_modal": dual_modal,
         "device": device,
+        "architecture_variant": "legacy_gate" if legacy_gate else "current",
     }
     return model, postprocess, runtime_meta
+
+
+def _checkpoint_uses_legacy_gate(checkpoint: dict[str, Any]) -> bool:
+    """
+    通过历史门控专有参数判断 checkpoint 是否属于旧门控实现。
+    这里不靠文件名猜测，避免用户后续改名后再次失效。
+    """
+    model_state = checkpoint.get("model", {})
+    return any(
+        key.endswith("alpha_attn") or key.endswith("alpha_ffn")
+        for key in model_state
+    )
+
+
+def _build_legacy_gate_runtime(
+    checkpoint: dict[str, Any],
+    checkpoint_path: Path,
+    class_names: list[str],
+    resolution: int,
+    device: str,
+    use_white: bool,
+    fusion_type: str,
+    fusion_num_layers: int,
+) -> tuple[torch.nn.Module, PostProcess]:
+    """
+    历史门控权重需要先按旧结构建模，再复用当前统一评估口径。
+    这里刻意只替换建模与权重加载语义，不改后续 AP/F1/FPS 统计逻辑。
+    """
+    checkpoint_args = checkpoint.get("args")
+    args_dict = vars(checkpoint_args).copy() if checkpoint_args is not None else {}
+    args_dict.update(
+        {
+            "num_classes": len(class_names),
+            "class_names": class_names,
+            "pretrain_weights": None,
+            "resolution": resolution,
+            "device": device,
+            "dual_modal": True,
+            "use_white": use_white,
+            "fusion_type": fusion_type,
+            "fusion_num_layers": fusion_num_layers,
+        }
+    )
+    args = populate_args(**args_dict)
+    model = build_legacy_gate_dual_model(args).to(device)
+
+    model_state = checkpoint["model"].copy()
+    num_desired_queries = int(args.num_queries) * int(args.group_detr)
+    for name in list(model_state.keys()):
+        if name.endswith("refpoint_embed.weight") or name.endswith("query_feat.weight"):
+            model_state[name] = model_state[name][:num_desired_queries]
+
+    checkpoint_num_classes = int(model_state["class_embed.bias"].shape[0])
+    if checkpoint_num_classes != args.num_classes + 1:
+        model.reinitialize_detection_head(checkpoint_num_classes)
+
+    model.load_state_dict(model_state, strict=False)
+
+    if checkpoint_num_classes != args.num_classes + 1:
+        model.reinitialize_detection_head(args.num_classes + 1)
+
+    model = model.to(device)
+    model.eval()
+    postprocess = PostProcess(num_select=args.num_select)
+    return model, postprocess
 
 
 def _load_and_preprocess_pair(
@@ -316,6 +425,7 @@ def _maybe_compute_gflops(
     model: torch.nn.Module,
     resolution: int,
     device: str,
+    dual_modal: bool,
 ) -> tuple[float | None, str | None]:
     """
     尝试计算 GFLOPs。
@@ -329,12 +439,15 @@ def _maybe_compute_gflops(
         return None, "环境中未安装 thop，GFLOPs 未计算。"
 
     sample_uv = torch.randn(1, 3, resolution, resolution, device=device)
-    sample_white = torch.randn(1, 3, resolution, resolution, device=device)
+    sample_white = torch.randn(1, 3, resolution, resolution, device=device) if dual_modal else None
 
     try:
         model.eval()
         with torch.no_grad():
-            macs, _ = profile(model, inputs=(sample_uv, sample_white), verbose=False)
+            if dual_modal:
+                macs, _ = profile(model, inputs=(sample_uv, sample_white), verbose=False)
+            else:
+                macs, _ = profile(model, inputs=(sample_uv,), verbose=False)
         # NOTE: approximate FLOPs, may be inaccurate for custom ops.
         # 常见论文表格更倾向写 FLOPs，因此这里按 2 * MACs 换算。
         gflops = float(macs * 2.0 / 1e9)
@@ -351,6 +464,7 @@ def _run_single_pair(
     resolution: int,
     device: str,
     confidence_threshold: float,
+    dual_modal: bool,
 ) -> tuple[dict[str, Any], dict[str, Any], float]:
     img_uv, img_white, batch_uv, batch_white, target_sizes = _load_and_preprocess_pair(
         image_pair=image_pair,
@@ -363,7 +477,7 @@ def _run_single_pair(
         torch.cuda.synchronize()
     start_time = time.perf_counter()
     with torch.no_grad(), torch.amp.autocast(device_type="cuda", enabled=use_amp):
-        outputs = model(batch_uv, batch_white)
+        outputs = model(batch_uv, batch_white) if dual_modal else model(batch_uv)
         result = postprocess(outputs, target_sizes)[0]
     if device.startswith("cuda") and torch.cuda.is_available():
         torch.cuda.synchronize()
@@ -416,6 +530,7 @@ def _run_warmup(
     resolution: int,
     device: str,
     warmup_steps: int,
+    dual_modal: bool,
 ) -> None:
     for _ in range(max(warmup_steps, 0)):
         _run_single_pair(
@@ -425,6 +540,7 @@ def _run_warmup(
             resolution=resolution,
             device=device,
             confidence_threshold=0.0,
+            dual_modal=dual_modal,
         )
 
 
@@ -565,28 +681,70 @@ def _compute_detection_metrics(
     coco_eval.evaluate()
     coco_eval.accumulate()
     patched_pycocotools_summarize(coco_eval)
-    point_metrics = _compute_point_metrics_at_iou_and_score(
+    ap_class_map = _compute_ap_class_map(coco_eval=coco_eval, iou75_threshold=0.75, max_dets=100)
+    point_metrics = _compute_best_f1_metrics(
         coco_eval=coco_eval,
         iou_threshold=0.5,
-        score_threshold=0.5,
         max_dets=100,
+        ap_class_map=ap_class_map,
     )
     return {
         "AP50": float(coco_eval.stats[1]),
         "AP75": float(coco_eval.stats[2]),
         "mAP": float(coco_eval.stats[0]),
-        "Precision@0.5": float(point_metrics["precision"]),
-        "Recall@0.5": float(point_metrics["recall"]),
-        "F1@0.5": float(point_metrics["f1_score"]),
+        "Precision": float(point_metrics["precision"]),
+        "Recall": float(point_metrics["recall"]),
+        "F1-Score": float(point_metrics["f1_score"]),
         "details": {
             "definition": {
-                "precision_recall_f1": "Precision@IoU=0.5, score=0.5, maxDets=100",
+                "precision_recall_f1": "Precision/Recall/F1 at IoU=0.5 using the confidence threshold that maximizes overall F1; maxDets=100",
                 "ap": "COCO AP with maxDets=100",
             },
+            "confidence_threshold": float(point_metrics["confidence_threshold"]),
             "counts": point_metrics["counts"],
             "class_map": point_metrics["class_map"],
+            "pr_curve": point_metrics["pr_curve"],
         },
     }, None
+
+
+def _build_eval_index(
+    coco_eval: COCOeval,
+    area_range: tuple[float, float],
+) -> dict[int, dict[int, Any]]:
+    eval_by_cat_img: dict[int, dict[int, Any]] = {}
+    for entry in coco_eval.evalImgs:
+        if entry is None:
+            continue
+        if tuple(entry["aRng"]) != area_range:
+            continue
+        cat_id = int(entry["category_id"])
+        image_id = int(entry["image_id"])
+        eval_by_cat_img.setdefault(cat_id, {})[image_id] = entry
+    return eval_by_cat_img
+
+
+def _compute_ap_class_map(
+    coco_eval: COCOeval,
+    iou75_threshold: float,
+    max_dets: int,
+) -> dict[int, dict[str, float]]:
+    max_det_index = int(np.argwhere(np.array(coco_eval.params.maxDets) == max_dets).item())
+    area_index = 0
+    iou50_index = int(np.argwhere(np.isclose(coco_eval.params.iouThrs, 0.5)).item())
+    iou75_index = int(np.argwhere(np.isclose(coco_eval.params.iouThrs, iou75_threshold)).item())
+
+    ap_by_cat: dict[int, dict[str, float]] = {}
+    for cat_index, cat_id in enumerate(coco_eval.params.catIds):
+        precision_slice = coco_eval.eval["precision"][:, :, cat_index, area_index, max_det_index]
+        precision_masked = np.where(precision_slice > -1, precision_slice, np.nan)
+        ap_per_iou = np.nanmean(precision_masked, axis=1)
+        ap_by_cat[int(cat_id)] = {
+            "AP50": float(np.nanmean(precision_masked[iou50_index])),
+            "AP75": float(np.nanmean(precision_masked[iou75_index])),
+            "mAP": float(np.nanmean(ap_per_iou)),
+        }
+    return ap_by_cat
 
 
 def _compute_point_metrics_at_iou_and_score(
@@ -594,21 +752,10 @@ def _compute_point_metrics_at_iou_and_score(
     iou_threshold: float,
     score_threshold: float,
     max_dets: int,
+    eval_by_cat_img: dict[int, dict[int, Any]],
+    ap_class_map: dict[int, dict[str, float]],
 ) -> dict[str, Any]:
     iou_index = int(np.argwhere(np.isclose(coco_eval.params.iouThrs, iou_threshold)).item())
-    max_det_index = int(np.argwhere(np.array(coco_eval.params.maxDets) == max_dets).item())
-    area_all = tuple(coco_eval.params.areaRng[0])
-    iou75_index = int(np.argwhere(np.isclose(coco_eval.params.iouThrs, 0.75)).item())
-    area_index = 0
-
-    eval_by_cat_area_img: dict[int, dict[tuple[float, float], dict[int, Any]]] = {}
-    for entry in coco_eval.evalImgs:
-        if entry is None:
-            continue
-        cat_id = int(entry["category_id"])
-        image_id = int(entry["image_id"])
-        area_rng = tuple(entry["aRng"])
-        eval_by_cat_area_img.setdefault(cat_id, {}).setdefault(area_rng, {})[image_id] = entry
 
     true_positives = 0
     false_positives = 0
@@ -616,13 +763,13 @@ def _compute_point_metrics_at_iou_and_score(
     class_map: list[dict[str, Any]] = []
     cat_id_to_name = {cat["id"]: cat["name"] for cat in coco_eval.cocoGt.loadCats(coco_eval.params.catIds)}
 
-    for cat_index, cat_id in enumerate(coco_eval.params.catIds):
+    for cat_id in coco_eval.params.catIds:
         total_gt = 0
         tp = 0
         fp = 0
 
         for image_id in coco_eval.params.imgIds:
-            entry = eval_by_cat_area_img.get(int(cat_id), {}).get(area_all, {}).get(int(image_id))
+            entry = eval_by_cat_img.get(int(cat_id), {}).get(int(image_id))
             if entry is None:
                 continue
 
@@ -630,6 +777,10 @@ def _compute_point_metrics_at_iou_and_score(
             dt_scores = np.array(entry["dtScores"])
             dt_matches = np.array(entry["dtMatches"])[iou_index]
             dt_ignore = np.array(entry["dtIgnore"])[iou_index].astype(bool)
+            if max_dets > 0:
+                dt_scores = dt_scores[:max_dets]
+                dt_matches = dt_matches[:max_dets]
+                dt_ignore = dt_ignore[:max_dets]
 
             keep = (dt_scores >= score_threshold) & (~dt_ignore)
             tp += int(np.sum(dt_matches[keep] != 0))
@@ -648,18 +799,15 @@ def _compute_point_metrics_at_iou_and_score(
             else 0.0
         )
 
-        precision_slice = coco_eval.eval["precision"][:, :, cat_index, area_index, max_det_index]
-        precision_masked = np.where(precision_slice > -1, precision_slice, np.nan)
-        ap_per_iou = np.nanmean(precision_masked, axis=1)
         class_map.append(
             {
                 "class": cat_id_to_name.get(int(cat_id), f"class_{cat_id}"),
-                "AP50": float(np.nanmean(precision_masked[iou_index])),
-                "AP75": float(np.nanmean(precision_masked[iou75_index])),
-                "mAP": float(np.nanmean(ap_per_iou)),
-                "Precision@0.5": float(class_precision),
-                "Recall@0.5": float(class_recall),
-                "F1@0.5": float(class_f1),
+                "AP50": float(ap_class_map[int(cat_id)]["AP50"]),
+                "AP75": float(ap_class_map[int(cat_id)]["AP75"]),
+                "mAP": float(ap_class_map[int(cat_id)]["mAP"]),
+                "Precision": float(class_precision),
+                "Recall": float(class_recall),
+                "F1-Score": float(class_f1),
                 "counts": {
                     "tp": int(tp),
                     "fp": int(fp),
@@ -697,6 +845,74 @@ def _compute_point_metrics_at_iou_and_score(
     }
 
 
+def _collect_confidence_threshold_candidates(
+    coco_eval: COCOeval,
+    eval_by_cat_img: dict[int, dict[int, Any]],
+    max_dets: int,
+) -> list[float]:
+    score_values: list[np.ndarray] = []
+    for image_map in eval_by_cat_img.values():
+        for entry in image_map.values():
+            dt_scores = np.array(entry["dtScores"], dtype=float)
+            if max_dets > 0:
+                dt_scores = dt_scores[:max_dets]
+            if dt_scores.size > 0:
+                score_values.append(dt_scores)
+
+    if not score_values:
+        return [0.0]
+
+    all_scores = np.concatenate(score_values, axis=0)
+    unique_scores = np.unique(all_scores)
+    candidates = np.concatenate([unique_scores, np.array([0.0, 1.0])], axis=0)
+    return [float(value) for value in np.unique(candidates)]
+
+
+def _compute_best_f1_metrics(
+    coco_eval: COCOeval,
+    iou_threshold: float,
+    max_dets: int,
+    ap_class_map: dict[int, dict[str, float]],
+) -> dict[str, Any]:
+    area_all = tuple(coco_eval.params.areaRng[0])
+    eval_by_cat_img = _build_eval_index(coco_eval=coco_eval, area_range=area_all)
+    candidates = _collect_confidence_threshold_candidates(
+        coco_eval=coco_eval,
+        eval_by_cat_img=eval_by_cat_img,
+        max_dets=max_dets,
+    )
+
+    best_metrics: dict[str, Any] | None = None
+    pr_curve: list[dict[str, float]] = []
+
+    for threshold in candidates:
+        point_metrics = _compute_point_metrics_at_iou_and_score(
+            coco_eval=coco_eval,
+            iou_threshold=iou_threshold,
+            score_threshold=float(threshold),
+            max_dets=max_dets,
+            eval_by_cat_img=eval_by_cat_img,
+            ap_class_map=ap_class_map,
+        )
+        pr_curve.append(
+            {
+                "confidence_threshold": float(threshold),
+                "precision": float(point_metrics["precision"]),
+                "recall": float(point_metrics["recall"]),
+                "f1_score": float(point_metrics["f1_score"]),
+            }
+        )
+        if best_metrics is None or point_metrics["f1_score"] > best_metrics["f1_score"]:
+            best_metrics = {
+                **point_metrics,
+                "confidence_threshold": float(threshold),
+            }
+
+    assert best_metrics is not None
+    best_metrics["pr_curve"] = pr_curve
+    return best_metrics
+
+
 # ========== 第五部分：结果汇总与落盘 ==========
 def _build_summary_report(
     checkpoint_path: Path,
@@ -728,18 +944,20 @@ def _build_summary_report(
         "runtime": {
             "device": runtime_meta["device"],
             "resolution": runtime_meta["resolution"],
+            "dual_modal": runtime_meta["dual_modal"],
             "use_white": runtime_meta["use_white"],
             "fusion_type": runtime_meta["fusion_type"],
             "fusion_num_layers": runtime_meta["fusion_num_layers"],
             "confidence_threshold": runtime_meta["confidence_threshold"],
+            "architecture_variant": runtime_meta["architecture_variant"],
         },
         "table_like_metrics": {
             "AP50": None if metric_values is None else metric_values["AP50"],
             "AP75": None if metric_values is None else metric_values["AP75"],
-            "mAP": None if metric_values is None else metric_values["mAP"],
-            "Precision@0.5": None if metric_values is None else metric_values["Precision@0.5"],
-            "Recall@0.5": None if metric_values is None else metric_values["Recall@0.5"],
-            "F1@0.5": None if metric_values is None else metric_values["F1@0.5"],
+            "AP50-95": None if metric_values is None else metric_values["mAP"],
+            "Precision": None if metric_values is None else metric_values["Precision"],
+            "Recall": None if metric_values is None else metric_values["Recall"],
+            "F1-Score": None if metric_values is None else metric_values["F1-Score"],
             "FPS": fps,
             "GFLOPs": gflops,
             "Parameters(total)": int(parameter_count),
@@ -781,9 +999,9 @@ def main() -> Path:
     args = _parse_args()
 
     checkpoint_path = _resolve_checkpoint_path(args.checkpoint)
-    uv_dir = Path(args.uv_dir)
-    white_dir = Path(args.white_dir)
-    label_dir = Path(args.label_dir) if args.label_dir else None
+    uv_dir = _resolve_input_dir(args.uv_dir)
+    white_dir = _resolve_input_dir(args.white_dir)
+    label_dir = _resolve_input_dir(args.label_dir) if args.label_dir else None
     output_dir = _resolve_output_dir(args.output_dir)
     image_pairs = _build_image_pairs(uv_dir=uv_dir, white_dir=white_dir, label_dir=label_dir)
 
@@ -812,12 +1030,14 @@ def main() -> Path:
             resolution=runtime_meta["resolution"],
             device=args.device,
             warmup_steps=args.warmup,
+            dual_modal=runtime_meta["dual_modal"],
         )
 
     gflops, gflops_note = _maybe_compute_gflops(
         model=model,
         resolution=runtime_meta["resolution"],
         device=args.device,
+        dual_modal=runtime_meta["dual_modal"],
     )
 
     per_image_results: list[dict[str, Any]] = []
@@ -832,6 +1052,7 @@ def main() -> Path:
             resolution=runtime_meta["resolution"],
             device=args.device,
             confidence_threshold=args.confidence_threshold,
+            dual_modal=runtime_meta["dual_modal"],
         )
         per_image_results.append(pair_result)
         metric_predictions.append(metric_prediction)
@@ -846,7 +1067,11 @@ def main() -> Path:
         class_names=runtime_meta["class_names"],
     )
     if metrics_note is None:
-        metrics_note = "已基于 datasets/test_label 真实计算 AP、Precision、Recall 和 F1。"
+        metrics_note = (
+            "已基于 datasets/test_label 真实计算 AP；"
+            "Precision/Recall/F1 使用 IoU=0.5，遍历 confidence threshold 得到 PR 曲线，"
+            "并取总体 F1 最大值对应的 confidence。"
+        )
 
     summary_report = _build_summary_report(
         checkpoint_path=checkpoint_path,

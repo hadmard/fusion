@@ -13,7 +13,7 @@
   - custom.dual_dataset：实现成对 UV/White 数据集读取与 COCO 兼容评估接口。
   - custom.dual_transforms：实现双模态同步增强，保证框始终以 UV 标注为准。
   - custom.dual_collate：将 batch 组织成适合 RF-DETR 训练循环的结构。
-  - custom.train / custom.detect：提供独立训练与推理脚本入口。
+  - custom.train：提供独立训练脚本入口。
 
 """
 
@@ -41,11 +41,11 @@ def _prepend_sys_path(path: Path) -> None:
 
 def prepare_project_environment(*, change_cwd: bool = False) -> Path:
     """
-    文件说明：为 `custom/` 下的可执行脚本统一准备运行环境。
+    文件说明：为项目中的自定义训练、检测、评估脚本统一准备运行环境。
     功能说明：补齐项目根目录和 `src/` 路径，并在需要时切回项目根目录作为工作目录。
 
     这样做的原因：
-    1. `run_train.py`、`run_train_uv.py`、`run_detect.py` 之前各自复制了一份环境准备逻辑。
+    1. `run_train.py`、`run_train_uv.py` 以及后来的根目录检测/评估入口之前各自复制了一份环境准备逻辑。
     2. 这些重复代码很容易在未来只改一处，造成入口脚本之间静默漂移。
     3. 收敛到包级 helper 后，入口脚本可以只保留自己的主流程。
     """

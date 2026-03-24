@@ -1,26 +1,34 @@
-
 """
-文件说明：思路模块文件
-功能：在“UV 为主模态、White 为辅助模态”的前提下，实现单向的 UV<-White cross-attention，
-      并在多层融合时使用论文式的深度 attention residual 聚合。
+文件说明：本文件实现当前仓库的跨模态融合模块。
+功能说明：在“UV 为主模态、White 为辅助模态”的前提下，保留一对一兼容融合接口，
+并新增“同网格、多深度、顺序跨模态融合”主路径。
 
 结构概览：
-  第一部分：导入依赖
+  第一部分：导入依赖与常量
   第二部分：通用张量工具
-  第三部分：设计一层的单层跨模态注意力块 CrossModalFusionBlock
+  第三部分：单次跨模态读取块与通道投影
   第四部分：深度 attention residual 聚合
-  第五部分：多层堆叠封装 CrossModalFusionStack
-  第六部分：做兼容
-
+  第五部分：旧版一对一融合兼容层
+  第六部分：顺序多层级跨模态融合
+  第七部分：兼容别名
 """
 
-# ========== 第一部分：导入依赖 ==========
+# ========== 第一部分：导入依赖与常量 ==========
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Sequence
 
 import torch
 from torch import nn
+
+FUSION_DIM = 256
+EXPECTED_FUSION_LEVELS = 4
+SAME_LEVEL_FIRST_READ_ORDERS = (
+    (0, 1, 2, 3),
+    (1, 0, 2, 3),
+    (2, 1, 3, 0),
+    (3, 2, 1, 0),
+)
 
 
 # ========== 第二部分：通用张量工具 ==========
@@ -52,7 +60,7 @@ def _restore_layout(x: torch.Tensor, metadata: dict[str, Any]) -> torch.Tensor:
     if metadata["layout"] == "tokens":
         return x
 
-    b, n, c = x.shape
+    _, n, c = x.shape
     h = metadata["height"]
     w = metadata["width"]
     expected_tokens = h * w
@@ -62,7 +70,7 @@ def _restore_layout(x: torch.Tensor, metadata: dict[str, Any]) -> torch.Tensor:
             f"UV token count {n} does not match UV patch grid {h}x{w} ({expected_tokens})."
         )
 
-    return x.transpose(1, 2).reshape(b, c, h, w).contiguous()
+    return x.transpose(1, 2).reshape(x.shape[0], c, h, w).contiguous()
 
 
 def _flatten_padding_mask(mask: torch.Tensor | None) -> torch.Tensor | None:
@@ -83,22 +91,6 @@ def _flatten_padding_mask(mask: torch.Tensor | None) -> torch.Tensor | None:
     )
 
 
-def _validate_modal_shapes(uv_tokens: torch.Tensor, white_tokens: torch.Tensor) -> None:
-    """
-    检查双模态输入在 batch 和 channel 维度上是否一致。
-    """
-    if uv_tokens.shape[0] != white_tokens.shape[0]:
-        raise ValueError(
-            f"UV and White batch sizes must match, got {uv_tokens.shape[0]} and {white_tokens.shape[0]}."
-        )
-
-    if uv_tokens.shape[-1] != white_tokens.shape[-1]:
-        raise ValueError(
-            "UV and White channel dimensions must match before fusion. "
-            f"Got {uv_tokens.shape[-1]} and {white_tokens.shape[-1]}."
-        )
-
-
 def _apply_padding_mask(tokens: torch.Tensor, padding_mask: torch.Tensor | None) -> torch.Tensor:
     """
     将 padding 位置显式清零，避免这些位置在深度聚合时变成脏值来源。
@@ -106,6 +98,23 @@ def _apply_padding_mask(tokens: torch.Tensor, padding_mask: torch.Tensor | None)
     if padding_mask is None:
         return tokens
     return tokens.masked_fill(padding_mask.unsqueeze(-1), 0.0)
+
+
+def _validate_modal_shapes(query_tokens: torch.Tensor, memory_tokens: torch.Tensor) -> None:
+    """
+    检查跨模态读取两端在 batch 与 channel 维度上是否兼容。
+    """
+    if query_tokens.shape[0] != memory_tokens.shape[0]:
+        raise ValueError(
+            "UV and White batch sizes must match before fusion. "
+            f"Got {query_tokens.shape[0]} and {memory_tokens.shape[0]}."
+        )
+
+    if query_tokens.shape[-1] != memory_tokens.shape[-1]:
+        raise ValueError(
+            "UV and White channel dimensions must match before fusion. "
+            f"Got {query_tokens.shape[-1]} and {memory_tokens.shape[-1]}."
+        )
 
 
 def _rms_norm_last_dim(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
@@ -117,27 +126,113 @@ def _rms_norm_last_dim(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     return x * rms
 
 
-# ========== 第三部分：单层跨模态融合块 ==========
+def _normalize_feature_group(
+    *,
+    name: str,
+    features: Sequence[torch.Tensor],
+    expected_length: int,
+) -> list[torch.Tensor]:
+    """
+    将输入的特征列表转成普通 list，并明确检查长度。
+    """
+    feature_list = list(features)
+    if len(feature_list) != expected_length:
+        raise ValueError(
+            f"{name} must contain {expected_length} feature levels, got {len(feature_list)}."
+        )
+    return feature_list
+
+
+def _normalize_mask_group(
+    *,
+    masks: Sequence[torch.Tensor | None] | None,
+    expected_length: int,
+) -> list[torch.Tensor | None]:
+    """
+    将可选 mask 组标准化成固定长度的 list。
+    """
+    if masks is None:
+        return [None] * expected_length
+
+    mask_list = list(masks)
+    if len(mask_list) != expected_length:
+        raise ValueError(
+            f"Mask group must contain {expected_length} items, got {len(mask_list)}."
+        )
+    return mask_list
+
+
+def _validate_same_grid_feature_group(
+    *,
+    name: str,
+    features: Sequence[torch.Tensor],
+) -> None:
+    """
+    第一版明确只支持“同网格、多深度”特征。
+
+    如果输入不是同一个 patch 网格，当前 same-level-first 顺序融合就不再是
+    “同网格跨深度”语义，因此这里直接报错，不静默兼容成别的结构。
+    """
+    signatures = []
+    for index, feature in enumerate(features):
+        if feature.dim() == 4:
+            signatures.append(("grid", feature.shape[-2], feature.shape[-1]))
+        elif feature.dim() == 3:
+            signatures.append(("tokens", feature.shape[1]))
+        else:
+            raise ValueError(
+                f"{name}[{index}] must be [B, N, C] or [B, C, H, W], got {tuple(feature.shape)}."
+            )
+
+    reference_signature = signatures[0]
+    for index, signature in enumerate(signatures[1:], start=1):
+        if signature != reference_signature:
+            raise ValueError(
+                f"{name} must share the same patch grid in v1. "
+                f"Expected all signatures to match {reference_signature}, got {signature} at index {index}."
+            )
+
+
+# ========== 第三部分：单次跨模态读取块与通道投影 ==========
+class ChannelProjector(nn.Module):
+    """
+    负责把不同深度特征投到统一融合维度。
+
+    这里使用逐 token 的 Linear。对 [B, C, H, W] 网格输入来说，它等价于
+    “对每个空间位置做一次 1x1 conv 风格的通道线性变换”，只是实现上复用了
+    token 视角，方便和后续 attention 逻辑直接拼接。
+    """
+
+    def __init__(self, in_dim: int, out_dim: int):
+        super().__init__()
+        self.in_dim = in_dim
+        self.out_dim = out_dim
+        self.proj = nn.Linear(in_dim, out_dim)
+
+    def forward_tokens(self, tokens: torch.Tensor) -> torch.Tensor:
+        if tokens.shape[-1] != self.in_dim:
+            raise ValueError(
+                f"ChannelProjector expected last dim {self.in_dim}, got {tokens.shape[-1]}."
+            )
+        return self.proj(tokens)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        tokens, layout = _to_tokens(x)
+        projected_tokens = self.forward_tokens(tokens)
+        return _restore_layout(projected_tokens, layout)
+
+
 class CrossModalFusionBlock(nn.Module):
     """
-    单层的 UV-conditioned White reading 模块。
+    单次的 UV-conditioned White reading 模块。
 
-    这里的单层块只实现论文映射中的：
-        z_i = Attn(q=h_i, k=white, v=white)
+    职责固定为：
+        z_i = CrossAttn(q=current_uv_state, k=current_white_level, v=current_white_level)
 
     也就是说：
-      - 输入 h_i 由 stack 的深度 attention 聚合给出
-      - 本模块只负责“当前层从 White 读取什么信息”
-      - 不在块内做固定残差相加
+      - 它只负责“当前这一次从哪一路 White memory 读取信息”
+      - 不在块内做固定 residual 相加
       - 不在块内做 FFN
-
-    参数说明：
-        dim:
-            特征维度，也就是 token/channel 的最后一维大小。
-        num_heads:
-            Multi-head attention 的头数。
-        dropout:
-            attention 内部的 dropout。
     """
 
     def __init__(
@@ -148,19 +243,13 @@ class CrossModalFusionBlock(nn.Module):
     ):
         super().__init__()
 
-        # Multi-head attention 要求 dim 可以被 num_heads 整除。这里提前检查，避免模型跑到中途才因为维度不匹配而报错。
         if dim % num_heads != 0:
             raise ValueError(
                 f"Feature dim ({dim}) must be divisible by num_heads ({num_heads})."
             )
 
-        # 对跨模态 attention 保留 PreNorm。
-        # 这里刻意让 q 和 k 先归一化，再做打分，避免 UV / White 两路特征因为数值尺度不同而让点积失真。
         self.uv_norm = nn.LayerNorm(dim)
         self.white_norm = nn.LayerNorm(dim)
-
-        # 这里直接使用 PyTorch 自带的 MultiheadAttention。
-        # batch_first=True 使输入输出形状统一为 [B, N, C]。
         self.cross_attn = nn.MultiheadAttention(
             embed_dim=dim,
             num_heads=num_heads,
@@ -174,15 +263,8 @@ class CrossModalFusionBlock(nn.Module):
         white_tokens: torch.Tensor,
         white_padding_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """
-        在 token 空间执行一次：
-            z_i = Attn(q=LN(h_i), k=LN(white), v=white)
+        _validate_modal_shapes(uv_tokens, white_tokens)
 
-        这里 white 的 key 会做 LayerNorm，但 value 保持原值。
-        原因是：
-          - key 参与打分，需要抑制数值尺度差异
-          - value 承担的是被取回的内容，保留原幅值更有利于表达“这一层更新量到底有多强”
-        """
         q = self.uv_norm(uv_tokens)
         k = self.white_norm(white_tokens)
         attn_out, _ = self.cross_attn(
@@ -200,26 +282,9 @@ class CrossModalFusionBlock(nn.Module):
         white: torch.Tensor,
         white_padding_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """
-        执行一次单层 UV<-White 跨模态 attention。
-
-        Args:
-            uv:
-                当前层聚合后的 h_i
-            white:
-                White 辅助模态特征
-            white_padding_mask:
-                White 侧 padding mask
-
-        Returns:
-            与 UV 输入布局一致的 z_i。
-        """
         uv_tokens, uv_layout = _to_tokens(uv)
         white_tokens, _ = _to_tokens(white)
-        _validate_modal_shapes(uv_tokens, white_tokens)
-
         white_mask = _flatten_padding_mask(white_padding_mask)
-
         fused_uv = self.forward_tokens(
             uv_tokens=uv_tokens,
             white_tokens=white_tokens,
@@ -231,21 +296,16 @@ class CrossModalFusionBlock(nn.Module):
 # ========== 第四部分：深度 attention residual 聚合 ==========
 class DepthAttentionResidual(nn.Module):
     """
-    具体思路来源于kimi最新的那个论文，虽然那个是在llm里面的，但是未尝不可用于cv，其实很多cv的顶刊都是在模仿llm的新思路
-    
-    这里借的是 Attention Residuals 的核心思想：
-      - 不再把前序层结果用固定权重硬加
-      - 而是让当前层按 learned pseudo-query 从历史状态中选择性聚合
+    使用 learnable pseudo-query 在深度方向聚合历史状态。
 
-    由于当前仓库的 fusion stack 层数很小，这里直接使用 full AttnRes 风格，
-    不额外做 block 压缩版本。
+    本轮明确沿用这一设计，而不是从输入动态生成聚合权重，原因是：
+      - 我们要把“去哪一路 White 读”与“读回来后信哪些历史状态”拆开
+      - 当前阶段先验证固定结构本身，不额外引入输入相关的门控复杂度
     """
 
     def __init__(self, dim: int, num_queries: int, eps: float = 1e-6):
         super().__init__()
         self.eps = eps
-
-        # 前 num_queries-1 个 query 给中间层深度聚合，最后 1 个给 stack 输出聚合。
         self.queries = nn.Parameter(torch.empty(num_queries, dim))
         nn.init.normal_(self.queries, mean=0.0, std=0.02)
 
@@ -255,12 +315,6 @@ class DepthAttentionResidual(nn.Module):
         query_index: int,
         padding_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """
-        对 history_states 在深度维度上做 softmax attention。
-
-        history_states 中每个元素的形状都是 [B, N, C]。
-        attention 权重沿“深度”维度归一化，而不是沿 token 维度归一化。
-        """
         if not history_states:
             raise ValueError("history_states must contain at least one tensor.")
 
@@ -273,48 +327,36 @@ class DepthAttentionResidual(nn.Module):
             return _apply_padding_mask(history_states[0], padding_mask)
 
         values = torch.stack(history_states, dim=0)
-        # 论文式写法是：
-        #   - key 用 RMSNorm 后参与打分
-        #   - value 保持原始历史表示本身
         keys = _rms_norm_last_dim(values, eps=self.eps)
         query = self.queries[query_index]
-
-        # 对每个 token 位置分别在深度维度上做注意力。
         logits = torch.einsum("c,sbnc->sbn", query, keys)
         weights = torch.softmax(logits, dim=0)
         aggregated = torch.einsum("sbn,sbnc->bnc", weights, values)
         return _apply_padding_mask(aggregated, padding_mask)
 
 
-# ========== 第五部分：多层堆叠封装 ==========
+# ========== 第五部分：旧版一对一融合兼容层 ==========
 class CrossModalFusionStack(nn.Module):
     """
-    将多个单层融合块顺序堆叠。
+    兼容旧的一对一 UV<-White 多层融合接口。
 
-    与旧版不同的是：
-      - 旧版：每一层只吃上一层输出，属于简单串行残差传播
-      - 新版：每一层进入融合块前，先对所有前序状态做一次深度 attention 聚合
-
-    也就是说，这里保留“多层融合”的外形，
-    但层间信息传递方式从固定残差链改成了论文式的 attention residual。
+    这个类保留旧名字，是为了避免仓库里可能残留的引用直接失效。
+    当前主路径已经切换到 `MultiLevelCrossModalFusion`，这里只承担兼容职责。
     """
 
     def __init__(
         self,
         dim: int,
         num_heads: int = 8,
-        num_layers: int = 6,
+        num_layers: int = 4,
         mlp_ratio: float = 4.0,
         dropout: float = 0.0,
     ):
         super().__init__()
 
-        # 层数至少为 1；如果是 0，就不应该实例化这个模块。
         if num_layers < 1:
             raise ValueError(f"num_layers must be >= 1, got {num_layers}.")
 
-        # 这里直接复制多个同构 attention 块。
-        # 每一层都保持相同的“UV 查询 White”语义，但是否读取哪一层历史状态，交给 depth attention 决定。
         self.blocks = nn.ModuleList(
             [
                 CrossModalFusionBlock(
@@ -325,13 +367,8 @@ class CrossModalFusionStack(nn.Module):
                 for _ in range(num_layers)
             ]
         )
-        # 对于 L 层 attention-only stack：
-        #   - h_2 ... h_L 需要 L-1 个 query
-        #   - 输出端 h_out 再需要 1 个 query
-        # 因此总共需要 L 个 depth queries。
         self.depth_residual = DepthAttentionResidual(dim=dim, num_queries=num_layers)
 
-        # FFN 只在 stack 最后出现一次。
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.final_ffn_norm = nn.LayerNorm(dim)
         self.final_ffn = nn.Sequential(
@@ -349,24 +386,12 @@ class CrossModalFusionStack(nn.Module):
         uv_padding_mask: torch.Tensor | None = None,
         white_padding_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """
-        顺序执行多层 UV<-White 融合。
-
-        这里始终保持：
-          - h_0 = UV 主分支初始表示
-          - White 是固定的辅助 memory
-          - 每层先由深度 attention 计算 h_i
-          - 再由跨模态 attention 计算 z_i
-          - 最后再对所有历史状态做一次深度聚合，并只在这里执行一次 FFN
-        """
         uv_tokens, uv_layout = _to_tokens(uv)
         white_tokens, _ = _to_tokens(white)
         _validate_modal_shapes(uv_tokens, white_tokens)
 
         uv_mask = _flatten_padding_mask(uv_padding_mask)
         white_mask = _flatten_padding_mask(white_padding_mask)
-
-        # h_0 直接来自 UV，本身就是深度聚合中的 identity source。
         h0 = _apply_padding_mask(uv_tokens, uv_mask)
         history_states = [h0]
 
@@ -387,7 +412,6 @@ class CrossModalFusionStack(nn.Module):
             )
             history_states.append(_apply_padding_mask(zi, uv_mask))
 
-        # stack 输出端再做一次深度聚合，得到最终 h_out。
         h_out = self.depth_residual(
             history_states=history_states,
             query_index=len(self.blocks) - 1,
@@ -398,7 +422,223 @@ class CrossModalFusionStack(nn.Module):
         return _restore_layout(fused_uv, uv_layout)
 
 
-# ========== 第六部分：兼容旧命名的别名 ==========
-# 为了避免旧测试或旧代码引用 CrossModalBlock 时直接失效，
-# 这里保留一个兼容别名。
+# ========== 第六部分：顺序多层级跨模态融合 ==========
+class SequentialCrossModalFusionLevel(nn.Module):
+    """
+    针对单个 UV 分支做“顺序读取 White 多层级 + AttnResidual 聚合”。
+
+    核心流程固定为：
+      1. 先把 U_l 投到统一融合维度
+      2. 按 same-level-first 顺序依次读取 4 个 White 分支
+      3. 第 2/3/4 次读取前，用 AttnResidual 聚合历史状态
+      4. 最后再做一次 AttnResidual + 最终 FFN
+      5. 投回原 UV 通道，保证 projector 接口不变
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        fusion_dim: int = FUSION_DIM,
+        num_heads: int = 8,
+        num_reads: int = EXPECTED_FUSION_LEVELS,
+        read_order: Sequence[int] | None = None,
+        mlp_ratio: float = 4.0,
+        dropout: float = 0.0,
+    ):
+        super().__init__()
+
+        if num_reads < 1:
+            raise ValueError(f"num_reads must be >= 1, got {num_reads}.")
+
+        self.num_reads = num_reads
+        self.read_order = tuple(read_order) if read_order is not None else tuple(range(num_reads))
+
+        if len(self.read_order) != self.num_reads:
+            raise ValueError(
+                f"read_order length ({len(self.read_order)}) must match num_reads ({self.num_reads})."
+            )
+
+        self.input_projector = ChannelProjector(input_dim, fusion_dim)
+        self.output_projector = ChannelProjector(fusion_dim, input_dim)
+        self.read_blocks = nn.ModuleList(
+            [
+                CrossModalFusionBlock(
+                    dim=fusion_dim,
+                    num_heads=num_heads,
+                    dropout=dropout,
+                )
+                for _ in range(num_reads)
+            ]
+        )
+        self.depth_residual = DepthAttentionResidual(dim=fusion_dim, num_queries=num_reads)
+
+        mlp_hidden_dim = int(fusion_dim * mlp_ratio)
+        self.final_ffn_norm = nn.LayerNorm(fusion_dim)
+        self.final_ffn = nn.Sequential(
+            nn.Linear(fusion_dim, mlp_hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(mlp_hidden_dim, fusion_dim),
+            nn.Dropout(dropout),
+        )
+
+    def forward(
+        self,
+        uv: torch.Tensor,
+        projected_white_features: Sequence[torch.Tensor],
+        uv_padding_mask: torch.Tensor | None = None,
+        white_padding_masks: Sequence[torch.Tensor | None] | None = None,
+    ) -> torch.Tensor:
+        white_feature_list = _normalize_feature_group(
+            name="projected_white_features",
+            features=projected_white_features,
+            expected_length=self.num_reads,
+        )
+        white_mask_list = _normalize_mask_group(
+            masks=white_padding_masks,
+            expected_length=self.num_reads,
+        )
+
+        uv_tokens, uv_layout = _to_tokens(uv)
+        uv_mask = _flatten_padding_mask(uv_padding_mask)
+        h0 = self.input_projector.forward_tokens(uv_tokens)
+        h0 = _apply_padding_mask(h0, uv_mask)
+
+        white_tokens_list: list[torch.Tensor] = []
+        flattened_white_masks: list[torch.Tensor | None] = []
+        for white_feature, white_mask in zip(white_feature_list, white_mask_list):
+            white_tokens, _ = _to_tokens(white_feature)
+            _validate_modal_shapes(h0, white_tokens)
+            white_tokens_list.append(white_tokens)
+            flattened_white_masks.append(_flatten_padding_mask(white_mask))
+
+        history_states = [h0]
+
+        for read_index, white_level_index in enumerate(self.read_order):
+            if read_index == 0:
+                current_state = h0
+            else:
+                current_state = self.depth_residual(
+                    history_states=history_states,
+                    query_index=read_index - 1,
+                    padding_mask=uv_mask,
+                )
+
+            zi = self.read_blocks[read_index].forward_tokens(
+                uv_tokens=current_state,
+                white_tokens=white_tokens_list[white_level_index],
+                white_padding_mask=flattened_white_masks[white_level_index],
+            )
+            history_states.append(_apply_padding_mask(zi, uv_mask))
+
+        h_out = self.depth_residual(
+            history_states=history_states,
+            query_index=self.num_reads - 1,
+            padding_mask=uv_mask,
+        )
+        fused_tokens = h_out + self.final_ffn(self.final_ffn_norm(h_out))
+        fused_tokens = self.output_projector.forward_tokens(fused_tokens)
+        fused_tokens = _apply_padding_mask(fused_tokens, uv_mask)
+        return _restore_layout(fused_tokens, uv_layout)
+
+
+class MultiLevelCrossModalFusion(nn.Module):
+    """
+    管理 4 路 UV 与 4 路 White 的同网格顺序跨模态融合。
+
+    第一版明确只支持：
+      - 4 路 encoder depth features
+      - same-level-first 固定读取顺序
+      - 每个 UV level 独立去读 White 的 4 个 level
+    """
+
+    def __init__(
+        self,
+        input_dims: Sequence[int],
+        num_heads: int = 8,
+        num_reads: int = EXPECTED_FUSION_LEVELS,
+        fusion_dim: int = FUSION_DIM,
+        dropout: float = 0.0,
+    ):
+        super().__init__()
+
+        input_dim_list = list(input_dims)
+        if len(input_dim_list) != EXPECTED_FUSION_LEVELS:
+            raise ValueError(
+                "Sequential same-grid fusion v1 expects exactly 4 encoder feature levels. "
+                f"Got {len(input_dim_list)} levels."
+            )
+
+        if num_reads != EXPECTED_FUSION_LEVELS:
+            raise ValueError(
+                "Sequential same-grid fusion v1 uses exactly 4 reads so it can query "
+                "W2/W5/W8/W11 in a fixed order. "
+                f"Got num_reads={num_reads}."
+            )
+
+        self.white_projectors = nn.ModuleList(
+            [ChannelProjector(in_dim=dim, out_dim=fusion_dim) for dim in input_dim_list]
+        )
+        self.level_fusions = nn.ModuleList(
+            [
+                SequentialCrossModalFusionLevel(
+                    input_dim=input_dim_list[level_index],
+                    fusion_dim=fusion_dim,
+                    num_heads=num_heads,
+                    num_reads=num_reads,
+                    read_order=SAME_LEVEL_FIRST_READ_ORDERS[level_index],
+                    dropout=dropout,
+                )
+                for level_index in range(EXPECTED_FUSION_LEVELS)
+            ]
+        )
+
+    def forward(
+        self,
+        uv_features: Sequence[torch.Tensor],
+        white_features: Sequence[torch.Tensor],
+        uv_padding_masks: Sequence[torch.Tensor | None] | None = None,
+        white_padding_masks: Sequence[torch.Tensor | None] | None = None,
+    ) -> list[torch.Tensor]:
+        uv_feature_list = _normalize_feature_group(
+            name="uv_features",
+            features=uv_features,
+            expected_length=EXPECTED_FUSION_LEVELS,
+        )
+        white_feature_list = _normalize_feature_group(
+            name="white_features",
+            features=white_features,
+            expected_length=EXPECTED_FUSION_LEVELS,
+        )
+        uv_mask_list = _normalize_mask_group(
+            masks=uv_padding_masks,
+            expected_length=EXPECTED_FUSION_LEVELS,
+        )
+        white_mask_list = _normalize_mask_group(
+            masks=white_padding_masks,
+            expected_length=EXPECTED_FUSION_LEVELS,
+        )
+
+        _validate_same_grid_feature_group(name="uv_features", features=uv_feature_list)
+        _validate_same_grid_feature_group(name="white_features", features=white_feature_list)
+
+        projected_white_features = [
+            projector(feature)
+            for projector, feature in zip(self.white_projectors, white_feature_list)
+        ]
+
+        fused_features: list[torch.Tensor] = []
+        for level_index, level_fusion in enumerate(self.level_fusions):
+            fused_feature = level_fusion(
+                uv=uv_feature_list[level_index],
+                projected_white_features=projected_white_features,
+                uv_padding_mask=uv_mask_list[level_index],
+                white_padding_masks=white_mask_list,
+            )
+            fused_features.append(fused_feature)
+
+        return fused_features
+
+
+# ========== 第七部分：兼容别名 ==========
 CrossModalBlock = CrossModalFusionBlock

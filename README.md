@@ -57,8 +57,16 @@ custom/
   train/
     run_train.py        # 双模态训练启动脚本
     run_train_uv.py     # UV-only 消融训练启动脚本
-  detect/
-    run_detect.py       # 双模态推理 & 可视化脚本
+detect/
+  image_uv/             # 待检测的 UV 图片
+  image_white/          # 待检测的 White 图片
+  run_detect_kimi.py    # kimi.pth 的双模态检测入口
+  run_detect_menkong.py # menkong.pth 的双模态检测入口
+
+eval/
+  run_eval_kimi.py      # kimi.pth 的专用评估入口
+  run_eval_menkong.py   # menkong.pth 的专用评估入口
+  legacy_gate_model.py  # menkong.pth 的旧门控兼容层
 
 datasets/
   images/               # UV 图像
@@ -128,12 +136,20 @@ python -m custom.train.run_train_uv
 ## 推理
 
 ```bash
-python custom/detect/run_detect.py
+python detect/run_detect_kimi.py
+# 或
+python detect/run_detect_menkong.py
 ```
 
-结果保存在 `output/detect/<时间戳>/`，包含：
+使用前请先把：
+- UV 图片放进 `detect/image_uv/`
+- White 图片放进 `detect/image_white/`
+- 对应权重放进 `eval/`
+
+结果保存在 `output/detect/<时间戳>/<模型名>/`，包含：
 - 可视化图像（检测框叠加在 UV 图上）
-- `detections.json`
+- `summary_report.json`
+- `per_image_detections.json`
 
 ---
 

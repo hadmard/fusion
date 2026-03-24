@@ -99,7 +99,7 @@ class ModelConfig(BaseConfig):
     use_white: bool = True
     fusion_type: Literal["none", "uv_queries_white"] = "uv_queries_white"
     fusion_num_heads: int = 8
-    fusion_num_layers: int = 6
+    fusion_num_layers: int = 4
     license: str = "Apache-2.0"
 
     @field_validator("pretrain_weights", mode="after")
@@ -386,7 +386,7 @@ class TrainConfig(BaseModel):
     use_white: bool = True
     fusion_type: Literal["none", "uv_queries_white"] = "uv_queries_white"
     fusion_num_heads: int = 8
-    fusion_num_layers: int = 6
+    fusion_num_layers: int = 4
     # PTL runtime/perf tuning knobs.
     train_log_sync_dist: bool = False
     train_log_on_step: bool = False

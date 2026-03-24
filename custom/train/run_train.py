@@ -46,7 +46,7 @@ MODALITY_MODE = "dual_uv_white"
 SUPPORTED_MODALITY_MODES = {"dual_uv_white", "uv_only"}
 USE_WHITE = True
 FUSION_TYPE = "uv_queries_white"
-FUSION_NUM_LAYERS = 6
+FUSION_NUM_LAYERS = 4
 
 # Resume
 RESUME = ""

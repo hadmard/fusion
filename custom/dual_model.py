@@ -20,7 +20,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from custom.cross_modal import CrossModalFusionStack
+from custom.cross_modal import MultiLevelCrossModalFusion
 from rfdetr.models.backbone import build_backbone
 from rfdetr.models.lwdetr import LWDETR
 from rfdetr.models.segmentation_head import SegmentationHead
@@ -59,7 +59,7 @@ class DualModalLWDETR(LWDETR):
         use_white: bool = True,
         fusion_type: str = "uv_queries_white",
         fusion_num_heads: int = 8,
-        fusion_num_layers: int = 6,
+        fusion_num_layers: int = 4,
     ):
         # 先初始化 RF-DETR 原始主干。
         # 这样可以最大限度复用已有检测头、transformer、two-stage 等逻辑。
@@ -93,19 +93,15 @@ class DualModalLWDETR(LWDETR):
 
         self.fusion_enabled = self.use_white and self.fusion_type == "uv_queries_white"
 
-        # 融合点前移到 projector 之前，因此这里按 encoder 输出层级创建融合层。
+        # 融合点前移到 projector 之前，因此这里直接按 encoder 输出层级创建
+        # “整组 UV / White” 的顺序跨模态融合模块。
         # projector 会在融合后的 UV encoder features 之上继续构建多尺度检测特征。
         encoder_feature_dims = list(backbone[0].encoder._out_feature_channels)
-        self.fusion_layers = (
-            nn.ModuleList(
-                [
-                    CrossModalFusionStack(
-                        dim=feature_dim,
-                        num_heads=fusion_num_heads,
-                        num_layers=fusion_num_layers,
-                    )
-                    for feature_dim in encoder_feature_dims
-                ]
+        self.fusion_module = (
+            MultiLevelCrossModalFusion(
+                input_dims=encoder_feature_dims,
+                num_heads=fusion_num_heads,
+                num_reads=fusion_num_layers,
             )
             if self.fusion_enabled
             else None
@@ -125,12 +121,12 @@ class DualModalLWDETR(LWDETR):
         white_features: List[NestedTensor],
     ) -> List[NestedTensor]:
         """
-        对每个特征层执行一次 UV<-White 融合。
+        对整组 encoder features 执行一次顺序跨模态融合。
 
         输入输出都仍然保持 RF-DETR 原本使用的 List[NestedTensor] 结构，
         以便后续 transformer 逻辑无需任何改动。
         """
-        if self.fusion_layers is None:
+        if self.fusion_module is None:
             return uv_features
 
         # 两个模态必须具有相同的特征层数。
@@ -139,29 +135,30 @@ class DualModalLWDETR(LWDETR):
                 f"UV/White feature levels mismatch: {len(uv_features)} vs {len(white_features)}."
             )
 
-        if len(uv_features) != len(self.fusion_layers):
-            raise ValueError(
-                f"Fusion layers ({len(self.fusion_layers)}) do not match feature levels ({len(uv_features)})."
-            )
+        uv_tensors: List[torch.Tensor] = []
+        uv_masks: List[torch.Tensor] = []
+        white_tensors: List[torch.Tensor] = []
+        white_masks: List[torch.Tensor] = []
 
-        fused_features: List[NestedTensor] = []
-
-        # 对每个 level 独立融合，保持多尺度结构不被打乱。
-        for uv_feat, white_feat, fusion_layer in zip(
-            uv_features, white_features, self.fusion_layers
-        ):
+        for uv_feat, white_feat in zip(uv_features, white_features):
             uv_src, uv_mask = uv_feat.decompose()
             white_src, white_mask = white_feat.decompose()
+            uv_tensors.append(uv_src)
+            uv_masks.append(uv_mask)
+            white_tensors.append(white_src)
+            white_masks.append(white_mask)
 
-            fused_uv = fusion_layer(
-                uv=uv_src,
-                white=white_src,
-                uv_padding_mask=uv_mask,
-                white_padding_mask=white_mask,
-            )
-            fused_features.append(NestedTensor(fused_uv, uv_mask))
+        fused_uv_tensors = self.fusion_module(
+            uv_features=uv_tensors,
+            white_features=white_tensors,
+            uv_padding_masks=uv_masks,
+            white_padding_masks=white_masks,
+        )
 
-        return fused_features
+        return [
+            NestedTensor(fused_uv, uv_mask)
+            for fused_uv, uv_mask in zip(fused_uv_tensors, uv_masks)
+        ]
 
     def _extract_encoder_features(self, samples: NestedTensor) -> List[NestedTensor]:
         """
@@ -441,6 +438,6 @@ def build_dual_model(args):
         use_white=getattr(args, "use_white", True),
         fusion_type=getattr(args, "fusion_type", "uv_queries_white"),
         fusion_num_heads=getattr(args, "fusion_num_heads", getattr(args, "ca_nheads", 8)),
-        fusion_num_layers=getattr(args, "fusion_num_layers", 1),
+        fusion_num_layers=getattr(args, "fusion_num_layers", 4),
     )
     return model
