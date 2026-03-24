@@ -52,15 +52,18 @@ FUSION_NUM_LAYERS = 4
 RESUME = ""
 
 # Training
-# 这里恢复正常训练默认值；smoke 阶段的 batch 限制默认关闭。
+# 当前默认参数按这台 9800X3D + 96GB RAM + RTX 5090 机器的“稳健长跑”思路收紧：
+# - 保持 batch=6 不动
+# - 用 grad accum 把有效 batch 提到 12，而不是继续放大单卡 batch
+# - warmup 拉长一点，给双模态和多尺度更稳的起步空间
 EPOCHS = 160
 BATCH_SIZE = 6
-GRAD_ACCUM_STEPS = 1
+GRAD_ACCUM_STEPS = 2
 MAX_TRAIN_BATCHES = 0
 MAX_VAL_BATCHES = 0
 MAX_TEST_BATCHES = 0
-LR = 1.5e-4
-LR_ENCODER = 2.1e-4
+LR = 1.2e-4
+LR_ENCODER = 1.8e-4
 WEIGHT_DECAY = 1e-4
 CLIP_MAX_NORM = 0.1
 
@@ -72,7 +75,7 @@ DROP_PATH = 0.1
 USE_EMA = True
 MULTI_SCALE = True
 LR_SCHEDULER = "cosine"
-WARMUP_EPOCHS = 2
+WARMUP_EPOCHS = 3
 LR_MIN_FACTOR = 0.0
 RESUME_LOAD_LR_SCHEDULER = False
 SQUARE_RESIZE_DIV_64 = True
