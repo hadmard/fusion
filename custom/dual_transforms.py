@@ -19,13 +19,8 @@
   外观增强：
     3. DualWhiteLightJitter             p=0.35
        仅作用于 White，亮度/对比度各 ±12%，饱和度 ±6%。
-    4. DualUVFluorescenceJitter         p=0.4
-       仅作用于 UV，模拟荧光强度波动（增益 0.92~1.12）、
-       gamma 校正（0.9~1.12）、蓝通道增益（0.95~1.18）。
-    5. DualGaussianBlur                 p=0.08，kernel=3
-       UV 与 White 以独立概率施加高斯模糊。
-    6. DualGaussianNoise                p=0.2，std 0.003~0.012
-       UV 与 White 分别独立加噪（UV 噪声上限额外 ×1.5）。
+    4. 当前阶段先关闭 UV 强荧光扰动、模糊与加噪。
+       这样做是因为 PM 极小，更容易被这些纹理级扰动破坏边界。
 
   最终后处理：
     7. DualToTensor + DualNormalize
@@ -693,14 +688,8 @@ def make_dual_transforms(
                     hue=0.0,
                     p=0.35,
                 ),
-                DualUVFluorescenceJitter(
-                    p=0.4,
-                    intensity_gain=(0.92, 1.12),
-                    gamma_range=(0.9, 1.12),
-                    blue_gain=(0.95, 1.18),
-                ),
-                DualGaussianBlur(kernel_sizes=[3], p=0.08),
-                DualGaussianNoise(std_range=(0.003, 0.012), p=0.2),
+                # 先去掉最可能伤害 PM 小目标边界的异常纹理扰动，
+                # 保留更温和的白光照明抖动，先做一轮干净对照训练。
                 # ---------- 最终张量化 ----------
                 normalize,
             ]

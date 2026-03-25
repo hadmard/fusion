@@ -47,12 +47,15 @@ SUPPORTED_MODALITY_MODES = {"dual_uv_white", "uv_only"}
 USE_WHITE = True
 FUSION_TYPE = "uv_queries_white"
 FUSION_NUM_LAYERS = 4
+RESOLUTION = 672
 
 # Resume
 RESUME = ""
 
 # Training
 # 当前默认参数按这台 9800X3D + 96GB RAM + RTX 5090 机器的“稳健长跑”思路收紧：
+# - 先把默认训练分辨率从 560 提到 672，优先改善 PM 小目标可见性
+# - 672 是 56 的整数倍，和 patch_size=14、num_windows=4 的窗口约束兼容
 # - 保持 batch=6 不动
 # - 用 grad accum 把有效 batch 提到 12，而不是继续放大单卡 batch
 # - warmup 拉长一点，给双模态和多尺度更稳的起步空间
@@ -172,6 +175,7 @@ def run_training(
         use_white=use_white,
         fusion_type=fusion_type,
         fusion_num_layers=FUSION_NUM_LAYERS,
+        resolution=RESOLUTION,
     )
     model_kwargs = model_cfg.model_dump()
     model_kwargs["dual_modal"] = dual_modal
@@ -240,7 +244,7 @@ def run_training(
 
     effective_batch = BATCH_SIZE * GRAD_ACCUM_STEPS
     print(
-        f"{log_tag} mode={resolved_mode}, epochs={EPOCHS}, "
+        f"{log_tag} mode={resolved_mode}, resolution={RESOLUTION}, epochs={EPOCHS}, "
         f"batch={BATCH_SIZE}x{GRAD_ACCUM_STEPS}={effective_batch}, "
         f"max_train_batches={MAX_TRAIN_BATCHES}, max_val_batches={MAX_VAL_BATCHES}, "
         f"lr={LR}, scheduler={LR_SCHEDULER}, workers={NUM_WORKERS}, "

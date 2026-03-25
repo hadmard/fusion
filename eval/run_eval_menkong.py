@@ -1,49 +1,48 @@
 """
 文件说明：该文件是 `menkong.pth` 的专用评估入口。
-功能说明：固定读取根目录 `eval/menkong.pth`，并调用内部评估核心在成对测试集上输出完整评估结果。
+功能说明：默认读取根目录 `eval/model/menkong.pth`，并调用内部评估核心在成对测试集上输出完整评估结果。
 说明：该脚本会自动触发 `legacy_gate_model.py` 的旧门控兼容结构，不需要手工干预。
 
 使用方式：
-  1. 把 `menkong.pth` 放进根目录 `eval/` 文件夹。
+  1. 把 `menkong.pth` 放进根目录 `eval/model/` 文件夹。
   2. 直接运行：
      - `conda run -n rfdetr python eval/run_eval_menkong.py`
-  3. 如需显式指定测试集，也可以追加参数：
+  3. 如需临时改成别的权重文件名，也可以追加：
+     - `conda run -n rfdetr python eval/run_eval_menkong.py --model-name menkong_v2.pth`
+  4. 如需显式指定测试集，也可以继续追加参数：
      - `conda run -n rfdetr python eval/run_eval_menkong.py --uv-dir D:\desktop\fusion--\test_uv --white-dir D:\desktop\fusion--\test_white --label-dir D:\desktop\fusion--\test_label`
-  4. 输出会写到：
+  5. 输出会写到：
      - `output/eval/<时间戳>/`
 
 结构概览：
-  第一部分：导入依赖与路径常量
+  第一部分：导入公共评估入口
   第二部分：脚本入口
 """
 
 from __future__ import annotations
 
-import subprocess
 import sys
 from pathlib import Path
 
-
-# ========== 第一部分：导入依赖与路径常量 ==========
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-EVAL_DIR = Path(__file__).resolve().parent
-CORE_SCRIPT = EVAL_DIR / "eval_core.py"
-CHECKPOINT_PATH = EVAL_DIR / "menkong.pth"
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from custom.eval_entry_common import run_eval_entry
+
+
+# ========== 第一部分：导入公共评估入口 ==========
+DEFAULT_MODEL_NAME = "menkong.pth"
+PERSONALIZED_DEFAULT_ARGS: list[str] = []
 
 
 # ========== 第二部分：脚本入口 ==========
 def main() -> None:
-    if not CHECKPOINT_PATH.exists():
-        raise FileNotFoundError(f"未找到权重：{CHECKPOINT_PATH}。请先把 `menkong.pth` 放进根目录 `eval/`。")
-
-    command = [
-        sys.executable,
-        str(CORE_SCRIPT),
-        "--checkpoint",
-        str(CHECKPOINT_PATH),
-        *sys.argv[1:],
-    ]
-    subprocess.run(command, cwd=PROJECT_ROOT, check=True)
+    run_eval_entry(
+        default_model_name=DEFAULT_MODEL_NAME,
+        script_description="评估 `menkong.pth`，默认从 `eval/model/` 读取对应权重。",
+        personalized_args=PERSONALIZED_DEFAULT_ARGS,
+    )
 
 
 if __name__ == "__main__":

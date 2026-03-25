@@ -1,6 +1,6 @@
 """
-文件说明：本文件是 `eval/` 目录下的内部评估核心，不作为日常直接使用的入口。
-功能说明：负责加载单个权重并在成对测试集上计算统一指标，供 `eval/run_eval_kimi.py` 与 `eval/run_eval_menkong.py` 调用。
+文件说明：本文件是 `custom/` 目录下的内部评估核心，不作为日常直接使用的入口。
+功能说明：负责加载单个权重并在成对测试集上计算统一指标，供根目录 `eval/run_eval_*.py` 调用。
 
 使用方式：
   1. 日常评估请直接运行对应权重的专用脚本：
@@ -8,7 +8,7 @@
      - `conda run -n rfdetr python eval/run_eval_menkong.py`
   2. 上面两个脚本会各自固定权重，并调用本文件完成真实评估。
   3. 只有在需要单独调试单个权重时，才建议直接运行本文件，例如：
-     - `conda run -n rfdetr python eval/eval_core.py --checkpoint eval/kimi.pth --uv-dir D:\desktop\fusion--\test_uv --white-dir D:\desktop\fusion--\test_white --label-dir D:\desktop\fusion--\test_label`
+     - `conda run -n rfdetr python custom/eval_runtime.py --checkpoint eval/model/kimi.pth --uv-dir D:\desktop\fusion--\test_uv --white-dir D:\desktop\fusion--\test_white --label-dir D:\desktop\fusion--\test_label`
   4. 输出默认写入：
      - `output/eval/<时间戳>/`
 
@@ -53,7 +53,8 @@ PROJECT_ROOT = prepare_project_environment(change_cwd=True)
 from custom.dual_dataset import load_class_names, parse_yolo_label
 from custom.dual_model import build_dual_model
 from custom.rfdetr_compat import Model, populate_args
-from legacy_gate_model import build_legacy_gate_dual_model
+from custom.legacy_gate_model import build_legacy_gate_dual_model
+from custom.model_registry import resolve_model_checkpoint_path
 from rfdetr.evaluation.coco_eval import patched_pycocotools_summarize
 from rfdetr.models.lwdetr import PostProcess
 
@@ -77,7 +78,7 @@ def _parse_args() -> argparse.Namespace:
         "--checkpoint",
         type=str,
         default=None,
-        help="权重路径；默认自动优先寻找仓库根目录的 checkpoint_best_ema.pth。",
+        help="权重路径或模型文件名；默认优先读取 `eval/model/checkpoint_best_ema.pth`。",
     )
     parser.add_argument(
         "--uv-dir",
@@ -140,21 +141,36 @@ def _resolve_checkpoint_path(explicit_path: str | None) -> Path:
         checkpoint_path = Path(explicit_path)
         if checkpoint_path.exists():
             return checkpoint_path.resolve()
-        raise FileNotFoundError(f"指定的 checkpoint 不存在：{checkpoint_path}")
+        try:
+            return resolve_model_checkpoint_path(model_name=explicit_path)
+        except FileNotFoundError as exc:
+            raise FileNotFoundError(f"指定的 checkpoint 不存在：{checkpoint_path}") from exc
 
-    candidates = [
-        PROJECT_ROOT / "checkpoint_best_ema.pth",
-        PROJECT_ROOT / "checkpoint_best_regular.pth",
-        PROJECT_ROOT / "output" / "checkpoint_best_ema.pth",
-        PROJECT_ROOT / "output" / "checkpoint_best_regular.pth",
-    ]
+    candidates: list[Path] = []
+    try:
+        candidates.append(resolve_model_checkpoint_path("checkpoint_best_ema.pth"))
+    except FileNotFoundError:
+        # 新目录中没有默认 bestema 时，继续检查历史兜底位置，而不是在这里提前失败。
+        pass
+    candidates.extend(
+        [
+            PROJECT_ROOT / "checkpoint_best_ema.pth",
+            PROJECT_ROOT / "checkpoint_best_regular.pth",
+            PROJECT_ROOT / "output" / "checkpoint_best_ema.pth",
+            PROJECT_ROOT / "output" / "checkpoint_best_regular.pth",
+        ]
+    )
+    seen_candidates: list[Path] = []
     for candidate in candidates:
+        if candidate in seen_candidates:
+            continue
+        seen_candidates.append(candidate)
         if candidate.exists():
             return candidate.resolve()
 
     raise FileNotFoundError(
         "未找到可用的 best checkpoint。已检查："
-        + ", ".join(str(candidate) for candidate in candidates)
+        + ", ".join(str(candidate) for candidate in seen_candidates)
     )
 
 
@@ -165,6 +181,53 @@ def _resolve_input_dir(path_str: str | None) -> Path | None:
     if not path.is_absolute():
         path = PROJECT_ROOT / path
     return path.resolve()
+
+
+def _has_files(directory: Path | None) -> bool:
+    if directory is None or not directory.exists():
+        return False
+    return any(path.is_file() for path in directory.iterdir())
+
+
+def _resolve_default_eval_dirs(
+    uv_dir_arg: str,
+    white_dir_arg: str,
+    label_dir_arg: str | None,
+) -> tuple[Path, Path, Path | None]:
+    """
+    优先使用默认的 `datasets/test_*` 目录；如果这些默认目录存在但为空，
+    则自动回退到仓库内现成的 `datasets/*/val`。
+
+    这里只在“用户没有显式改路径”时触发回退，
+    避免覆盖手工指定的数据目录。
+    """
+    uv_dir = _resolve_input_dir(uv_dir_arg)
+    white_dir = _resolve_input_dir(white_dir_arg)
+    label_dir = _resolve_input_dir(label_dir_arg) if label_dir_arg else None
+
+    using_default_test_dirs = (
+        uv_dir_arg == "datasets/test_uv"
+        and white_dir_arg == "datasets/test_white"
+        and label_dir_arg == "datasets/test_label"
+    )
+    if not using_default_test_dirs:
+        return uv_dir, white_dir, label_dir
+
+    if _has_files(uv_dir) and _has_files(white_dir):
+        return uv_dir, white_dir, label_dir
+
+    fallback_uv_dir = (PROJECT_ROOT / "datasets" / "images" / "val").resolve()
+    fallback_white_dir = (PROJECT_ROOT / "datasets" / "images_white" / "val").resolve()
+    fallback_label_dir = (PROJECT_ROOT / "datasets" / "labels" / "val").resolve()
+
+    if _has_files(fallback_uv_dir) and _has_files(fallback_white_dir):
+        print(
+            "[Info] 默认 datasets/test_* 目录为空，自动回退到 "
+            "datasets/images/val + datasets/images_white/val + datasets/labels/val。"
+        )
+        return fallback_uv_dir, fallback_white_dir, fallback_label_dir
+
+    return uv_dir, white_dir, label_dir
 
 
 def _build_image_pairs(
@@ -999,9 +1062,11 @@ def main() -> Path:
     args = _parse_args()
 
     checkpoint_path = _resolve_checkpoint_path(args.checkpoint)
-    uv_dir = _resolve_input_dir(args.uv_dir)
-    white_dir = _resolve_input_dir(args.white_dir)
-    label_dir = _resolve_input_dir(args.label_dir) if args.label_dir else None
+    uv_dir, white_dir, label_dir = _resolve_default_eval_dirs(
+        uv_dir_arg=args.uv_dir,
+        white_dir_arg=args.white_dir,
+        label_dir_arg=args.label_dir,
+    )
     output_dir = _resolve_output_dir(args.output_dir)
     image_pairs = _build_image_pairs(uv_dir=uv_dir, white_dir=white_dir, label_dir=label_dir)
 

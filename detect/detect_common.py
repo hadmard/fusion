@@ -24,17 +24,17 @@ from PIL import Image, ImageDraw
 # ========== 第一部分：导入依赖与路径常量 ==========
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DETECT_DIR = Path(__file__).resolve().parent
-EVAL_DIR = PROJECT_ROOT / "eval"
 IMAGE_UV_DIR = DETECT_DIR / "image_uv"
 IMAGE_WHITE_DIR = DETECT_DIR / "image_white"
 OUTPUT_BASE_DIR = PROJECT_ROOT / "output" / "detect"
 DEFAULT_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 DEFAULT_CONFIDENCE_THRESHOLD = 0.5
 
-if str(EVAL_DIR) not in sys.path:
-    sys.path.insert(0, str(EVAL_DIR))
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
-from eval_core import _build_image_pairs, _load_checkpoint_runtime, _run_single_pair
+from custom.eval_runtime import _build_image_pairs, _load_checkpoint_runtime, _run_single_pair
+from custom.model_registry import resolve_model_checkpoint_path
 
 
 # ========== 第二部分：输出目录与结果保存 ==========
@@ -104,11 +104,7 @@ def _save_detection_report(
 
 # ========== 第三部分：对外检测入口 ==========
 def run_dual_modal_detection(*, checkpoint_name: str, script_name: str) -> Path:
-    checkpoint_path = (EVAL_DIR / checkpoint_name).resolve()
-    if not checkpoint_path.exists():
-        raise FileNotFoundError(
-            f"`{script_name}` 需要的权重不存在：{checkpoint_path}。请先把权重放进根目录 `eval/` 文件夹。"
-        )
+    checkpoint_path = resolve_model_checkpoint_path(model_name=checkpoint_name)
 
     if not IMAGE_UV_DIR.exists() or not IMAGE_WHITE_DIR.exists():
         raise FileNotFoundError(
