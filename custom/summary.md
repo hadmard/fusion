@@ -1,127 +1,107 @@
-## 三模型统一评估总表
+## 五模型统一评估总表
 
-- 额外前置说明：`kimi.pth` 是当前 6 层 `attention_residual` 无门控 cross-attention 融合版本，`menkong.pth` 是早期带门控的 cross-attention 融合版本，`uv_single.pth` 是仅使用紫外光输入的单模态版本。
+- 口径说明：
+  - 本页只保留当前可信的 5 个模型结果
+  - 测试集统一使用根目录 `test/uvtest`、`test/whitetest`、`test/labeltest`
+  - `high_resolution.pth`、`multi_feature.pth`、`kimi.pth` 已使用修复后的历史加载逻辑
+  - `menkong.pth` 是旧门控双模态基线
+  - `uv_single.pth` 是 UV-only 单模态效率基线
 
 ## 评估规格
 
-- 测试集：`D:\desktop\fusion--\test_uv`、`D:\desktop\fusion--\test_white`、`D:\desktop\fusion--\test_label`
-- 测试样本：83 对配对图像
-- AP 评估：`pycocotools.COCOeval`，`iouType=bbox`，`maxDets=[1, 10, 100]`
-- Precision / Recall / F1：固定 `IoU=0.5`，遍历 confidence threshold 形成 PR 曲线，取总体 F1 最大点对应阈值
+- 测试样本：83 对 UV/White 图像
+- AP 指标：`pycocotools.COCOeval`，`iouType=bbox`，`maxDets=[1, 10, 100]`
+- Precision / Recall / F1：固定 `IoU=0.5`，遍历 confidence threshold，取整体 F1 最大点对应阈值
 - FPS：先 warmup，再用 `torch.cuda.synchronize()` + `time.perf_counter()` 统计整体平均吞吐
 - GFLOPs：使用 `thop` 统计 `MACs`，再按 `GFLOPs = 2 * MACs / 1e9` 换算
-- Parameters(total)：直接统计模型参数总数
-- Model Size：直接读取 `.pth` 权重文件磁盘体积，不是按参数量反推
-
-## 各指标测算方式
-
-- `AP50(%)`
-  - 使用 `COCOeval` 的 bbox 指标。
-  - 固定 `maxDets=100`。
-  - 取 `IoU=0.50` 时的 AP，并乘以 100 转成百分比。
-- `AP75(%)`
-  - 使用 `COCOeval` 的 bbox 指标。
-  - 固定 `maxDets=100`。
-  - 取 `IoU=0.75` 时的 AP，并乘以 100 转成百分比。
-- `AP50-95(%)`
-  - 即 COCO 标准 `mAP`。
-  - 在 `IoU=0.50:0.95`、步长 `0.05` 上做平均。
-  - 固定 `maxDets=100`。
-  - 最终乘以 100 转成百分比。
-- `Precision`
-  - 固定 `IoU=0.5`。
-  - 遍历模型输出中的 confidence threshold，形成整条 PR 曲线。
-  - 取总体 `F1` 最大时对应的最优 confidence threshold。
-  - 在该阈值下统计 `TP`、`FP`、`FN`，并按 `TP / (TP + FP)` 计算。
-- `Recall`
-  - 与 `Precision` 使用同一个最优 confidence threshold。
-  - 固定 `IoU=0.5`。
-  - 按 `TP / (TP + FN)` 计算。
-- `F1-Score`
-  - 与 `Precision`、`Recall` 使用同一个最优 confidence threshold。
-  - 固定 `IoU=0.5`。
-  - 按 `2 * Precision * Recall / (Precision + Recall)` 计算。
-- `Best Confidence`
-  - 指在 `IoU=0.5` 下，遍历 confidence threshold 得到的 PR 曲线中，使总体 `F1` 最大的那个阈值。
-- `GFLOPs`
-  - 使用 `thop.profile(...)` 对模型单次前向做复杂度统计。
-  - 先构造与模型分辨率一致的假输入张量，再跑一遍前向。
-  - `thop` 返回 `MACs` 后，按 `GFLOPs = 2 * MACs / 1e9` 换算。
-  - 这是理论近似值，某些自定义算子可能带来少量误差。
-  - 双模态模型的 `GFLOPs` 表示“一对 UV + White 样本”的单次前向计算量；单模态模型表示“一张 UV 样本”的单次前向计算量。
-- `Parameters(total)`
-  - 直接统计模型中所有参数张量的元素总数。
-  - 计算方式等价于：`sum(parameter.numel() for parameter in model.parameters())`
-  - 这是模型真实参数量，不是估算值。
-- `FPS`
-  - 先对首个样本做 warmup，不计入正式统计。
-  - 每次正式计时：
-    - 如果使用 CUDA，前向前先 `torch.cuda.synchronize()`
-    - 使用 `time.perf_counter()` 记录开始时间
-    - 执行一次完整前向推理
-    - 如果使用 CUDA，前向后再次 `torch.cuda.synchronize()`
-    - 使用 `time.perf_counter()` 记录结束时间
-  - 最终按 `总样本数 / 总耗时` 计算。
-  - 这里的双模态 `FPS` 是“每秒处理多少对样本”，不是“每秒多少张原始图像”。
-- `Model Size`
-  - 直接读取 checkpoint 文件的磁盘体积。
-  - 计算方式等价于：`checkpoint_path.stat().st_size / (1024 * 1024)`
-  - 这个值包含 `.pth` 文件中实际保存的全部内容，通常不等于“参数量 × 4 字节”。
+- Parameters(total)：直接统计模型参数总量
+- Model Size：直接读取 `.pth` 权重文件磁盘体积
 
 ## 总体结果
 
-| Model | Modality | Architecture | AP50(%) | AP75(%) | AP50-95(%) | Precision | Recall | F1-Score | GFLOPs | Parameters(total) | FPS | Model Size | Best Confidence |
-|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| kimi.pth | Dual-modal | current | 82.94 | 65.71 | 63.10 | 0.8503 | 0.7997 | 0.8242 | 162.63 | 50,829,568 | 13.17 | 569.11 MB | 0.429199 |
-| menkong.pth | Dual-modal | legacy_gate | 82.47 | 65.36 | 63.47 | 0.8493 | 0.8093 | 0.8288 | 162.43 | 38,962,440 | 21.88 | 436.67 MB | 0.503906 |
-| uv_single.pth | UV-only | current | 82.84 | 66.25 | 63.64 | 0.8586 | 0.7869 | 0.8212 | 77.79 | 31,861,504 | 32.86 | 355.32 MB | 0.410645 |
-| checkpoint_best_ema.pth | Dual-modal | current | 81.59 | 64.85 | 62.31 | 0.8484 | 0.8145 | 0.8311 | 157.88 | 39,380,224 | 18.23 | 438.03 MB | 0.431396 |
+| Model | Modality | Architecture | Resolution | AP50 | AP75 | AP50-95 | Precision | Recall | F1 | PM AP50 | PM mAP | PM F1 | FPS | GFLOPs | Parameters(total) | Model Size | Best Confidence |
+|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| high_resolution.pth | Dual-modal | same_grid_readblocks | 672 | 0.833096 | 0.666302 | 0.639425 | 0.880783 | 0.791683 | 0.833860 | 0.663994 | 0.320285 | 0.655014 | 15.218880 | 225.683472 | 39,380,224 | 438.03 MB | 0.488037 |
+| uv_single.pth | UV-only | current | 560 | 0.828435 | 0.662487 | 0.636382 | 0.858639 | 0.786885 | 0.821198 | 0.653682 | 0.311036 | 0.645669 | 28.857690 | 77.786415 | 31,861,504 | 355.32 MB | 0.410645 |
+| menkong.pth | Dual-modal | legacy_gate | 560 | 0.824720 | 0.653597 | 0.634656 | 0.849350 | 0.809276 | 0.828829 | 0.675088 | 0.327386 | 0.674099 | 19.238707 | 162.433630 | 38,962,440 | 436.67 MB | 0.503906 |
+| kimi.pth | Dual-modal | fusion_layers_attnres | 560 | 0.829438 | 0.657062 | 0.630986 | 0.850340 | 0.799680 | 0.824232 | 0.648180 | 0.307002 | 0.634234 | 13.160060 | 162.630238 | 50,829,568 | 569.11 MB | 0.429199 |
+| multi_feature.pth | Dual-modal | same_grid_readblocks | 560 | 0.815875 | 0.648480 | 0.623125 | 0.848397 | 0.814474 | 0.831089 | 0.646341 | 0.309556 | 0.667817 | 14.854178 | 157.878878 | 39,380,224 | 438.03 MB | 0.431396 |
 
-## menkong.pth 分类别结果
+## 分类结果
 
-| Class | AP50(%) | AP75(%) | AP50-95(%) | Precision | Recall | F1-Score | TP | FP | FN |
+### high_resolution.pth
+
+| Class | AP50 | AP75 | AP50-95 | Precision | Recall | F1 | TP | FP | FN |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| NPML | 92.89 | 86.28 | 79.37 | 0.8869 | 0.8903 | 0.8886 | 1404 | 179 | 173 |
-| PML | 87.02 | 82.44 | 78.29 | 0.7882 | 0.8407 | 0.8136 | 227 | 61 | 43 |
-| PM | 67.51 | 27.36 | 32.74 | 0.7676 | 0.6009 | 0.6741 | 393 | 119 | 261 |
+| NPML | 0.946665 | 0.884630 | 0.804067 | 0.902581 | 0.887127 | 0.894787 | 1399 | 151 | 178 |
+| PML | 0.888628 | 0.849251 | 0.793924 | 0.849057 | 0.833333 | 0.841121 | 225 | 40 | 45 |
+| PM | 0.663994 | 0.265024 | 0.320285 | 0.822171 | 0.544343 | 0.655014 | 356 | 77 | 298 |
 
-## kimi.pth 分类别结果
+### uv_single.pth
 
-| Class | AP50(%) | AP75(%) | AP50-95(%) | Precision | Recall | F1-Score | TP | FP | FN |
+| Class | AP50 | AP75 | AP50-95 | Precision | Recall | F1 | TP | FP | FN |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| NPML | 94.49 | 87.83 | 80.02 | 0.8759 | 0.9042 | 0.8899 | 1426 | 202 | 151 |
-| PML | 89.53 | 83.65 | 78.57 | 0.8284 | 0.8222 | 0.8253 | 222 | 46 | 48 |
-| PM | 64.82 | 25.64 | 30.70 | 0.7719 | 0.5382 | 0.6342 | 352 | 104 | 302 |
+| NPML | 0.942396 | 0.879283 | 0.801143 | 0.901973 | 0.869372 | 0.885373 | 1371 | 149 | 206 |
+| PML | 0.889266 | 0.849881 | 0.796967 | 0.805654 | 0.844444 | 0.824593 | 228 | 55 | 42 |
+| PM | 0.653682 | 0.258297 | 0.311036 | 0.754601 | 0.564220 | 0.645669 | 369 | 120 | 285 |
 
-## uv_single.pth 分类别结果
+### menkong.pth
 
-| Class | AP50(%) | AP75(%) | AP50-95(%) | Precision | Recall | F1-Score | TP | FP | FN |
+| Class | AP50 | AP75 | AP50-95 | Precision | Recall | F1 | TP | FP | FN |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| NPML | 94.24 | 87.93 | 80.11 | 0.9020 | 0.8694 | 0.8854 | 1371 | 149 | 206 |
-| PML | 88.93 | 84.99 | 79.70 | 0.8057 | 0.8444 | 0.8246 | 228 | 55 | 42 |
-| PM | 65.37 | 25.83 | 31.10 | 0.7546 | 0.5642 | 0.6457 | 369 | 120 | 285 |
+| NPML | 0.928928 | 0.862762 | 0.793691 | 0.886860 | 0.890298 | 0.888576 | 1404 | 179 | 173 |
+| PML | 0.870142 | 0.824469 | 0.782891 | 0.788194 | 0.840741 | 0.813620 | 227 | 61 | 43 |
+| PM | 0.675088 | 0.273560 | 0.327386 | 0.767578 | 0.600917 | 0.674099 | 393 | 119 | 261 |
 
-## checkpoint_best_ema.pth 分类别结果
+### kimi.pth
 
-| Class | AP50(%) | AP75(%) | AP50-95(%) | Precision | Recall | F1-Score | TP | FP | FN |
+| Class | AP50 | AP75 | AP50-95 | Precision | Recall | F1 | TP | FP | FN |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| NPML | 93.64 | 86.85 | 79.52 | 0.8798 | 0.9004 | 0.8900 | 1420 | 194 | 157 |
-| PML | 86.48 | 82.84 | 76.46 | 0.8156 | 0.8519 | 0.8333 | 230 | 52 | 40 |
-| PM | 64.63 | 24.86 | 30.96 | 0.7663 | 0.5917 | 0.6678 | 387 | 118 | 267 |
+| NPML | 0.944877 | 0.878343 | 0.800220 | 0.875921 | 0.904249 | 0.889860 | 1426 | 202 | 151 |
+| PML | 0.895258 | 0.836482 | 0.785735 | 0.828358 | 0.822222 | 0.825279 | 222 | 46 | 48 |
+| PM | 0.648180 | 0.256362 | 0.307002 | 0.771930 | 0.538226 | 0.634234 | 352 | 104 | 302 |
+
+### multi_feature.pth
+
+| Class | AP50 | AP75 | AP50-95 | Precision | Recall | F1 | TP | FP | FN |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| NPML | 0.936450 | 0.868511 | 0.795237 | 0.879802 | 0.900444 | 0.890003 | 1420 | 194 | 157 |
+| PML | 0.864835 | 0.828359 | 0.764583 | 0.815603 | 0.851852 | 0.833333 | 230 | 52 | 40 |
+| PM | 0.646341 | 0.248571 | 0.309556 | 0.766337 | 0.591743 | 0.667817 | 387 | 118 | 267 |
 
 ## 简要结论
 
-- `uv_single.pth` 在 `AP75 / AP50-95 / FPS / GFLOPs` 上最有优势。
-- `menkong.pth` 在统一口径下的 `Recall / F1-Score` 最优，整体更均衡。
-- `kimi.pth` 结果稳定，但在这组三模型统一对比里不再明显领先。
-- `checkpoint_best_ema.pth` 是当前根目录一个独立双模态基线，整体风格也偏均衡，`Recall` 和 `F1` 较强。
-- 四者共同短板仍然是 `PM` 类别。
+- 整体主基线：`high_resolution.pth`
+  - `AP50-95 = 0.639425`
+  - `F1 = 0.833860`
+
+- PM 主基线：`menkong.pth`
+  - `PM AP50 = 0.675088`
+  - `PM mAP = 0.327386`
+  - `PM F1 = 0.674099`
+
+- 效率主基线：`uv_single.pth`
+  - `FPS = 28.857690`
+  - `GFLOPs = 77.786415`
+  - `Model Size = 355.32 MB`
+
+- `kimi.pth`
+  - 修复历史加载后已恢复正常
+  - 但当前口径下不是整体最优，也不是 PM 最优
+
+- `multi_feature.pth`
+  - 整体 F1 很高
+  - 但如果重点看 `PM AP50 / PM mAP`，仍不是第一选择
 
 ## 对应结果文件
 
-- 三模型旧汇总：
-  - `output/multi_checkpoint_eval/2026-03-24_174549/combined_summary.md`
-  - `output/multi_checkpoint_eval/2026-03-24_174549/combined_summary.json`
-- `checkpoint_best_ema.pth`：
-  - `output/eval/2026-03-24_224645/summary_report.json`
-  - `output/eval/2026-03-24_224645/per_image_detections.json`
+- `uv_single.pth`
+  - `output/eval/2026-04-03_090543/summary_report.json`
+- `menkong.pth`
+  - `output/eval/2026-04-03_090624/summary_report.json`
+- `high_resolution.pth`
+  - `output/eval/high_resolution_fixed_20260403/summary_report.json`
+- `multi_feature.pth`
+  - `output/eval/multi_feature_fixed_20260403/summary_report.json`
+- `kimi.pth`
+  - `output/eval/kimi_fixed_20260403/summary_report.json`

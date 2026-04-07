@@ -22,8 +22,12 @@ MODEL_DIR = EVAL_DIR / "model"
 MODEL_NAME_ALIASES = {
     "bestema": "checkpoint_best_ema.pth",
     "bestema.pth": "checkpoint_best_ema.pth",
+    "high_resolution": "high_resolution.pth",
+    "high_resolution.pth": "high_resolution.pth",
     "kimi": "kimi.pth",
     "menkong": "menkong.pth",
+    "multi_feature": "multi_feature.pth",
+    "multi_feature.pth": "multi_feature.pth",
     "uv_single": "uv_single.pth",
 }
 

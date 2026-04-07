@@ -1,0 +1,56 @@
+[
+  {
+    "model_name": "high_resolution.pth",
+    "source": "output/eval/2026-03-26_081900/summary_report.json",
+    "AP50-95": 0.6394252919366602,
+    "AP75": 0.6663016482092825,
+    "F1-Score": 0.833859759949463,
+    "FPS": 17.16996630321462,
+    "GFLOPs": 225.683472384
+  },
+  {
+    "model_name": "uv_single.pth",
+    "source": "output/eval/2026-03-25_221941/summary_report.json",
+    "AP50-95": 0.6363820374570353,
+    "AP75": 0.6624870330566062,
+    "F1-Score": 0.8211975798038808,
+    "FPS": 27.931208730789454,
+    "GFLOPs": 77.786415104
+  },
+  {
+    "model_name": "menkong.pth",
+    "source": "output/eval/2026-03-25_221856/summary_report.json",
+    "AP50-95": 0.6346558534260127,
+    "AP75": 0.6535969634174146,
+    "F1-Score": 0.8288288288288287,
+    "FPS": 17.854107505221066,
+    "GFLOPs": 162.433630208
+  },
+  {
+    "model_name": "checkpoint_best_ema.pth",
+    "source": "output/eval/2026-03-25_221713/summary_report.json",
+    "AP50-95": 0.6231251255783478,
+    "AP75": 0.6484802627761355,
+    "F1-Score": 0.8310893512851898,
+    "FPS": 12.983426952716501,
+    "GFLOPs": 157.878878208
+  },
+  {
+    "model_name": "high_resolution_regular.pth",
+    "source": "output/eval/2026-03-26_094323/summary_report.json",
+    "AP50-95": 0.5557688048756781,
+    "AP75": 0.5841164352917535,
+    "F1-Score": 0.7742073693230506,
+    "FPS": 18.68387287780995,
+    "GFLOPs": 225.683472384
+  },
+  {
+    "model_name": "kimi.pth",
+    "source": "output/eval/2026-03-25_222027/summary_report.json",
+    "AP50-95": 2.4502091676465088e-05,
+    "AP75": 8.733342241342419e-07,
+    "F1-Score": 0.002707324023938444,
+    "FPS": 12.767188019152862,
+    "GFLOPs": 157.878878208
+  }
+]

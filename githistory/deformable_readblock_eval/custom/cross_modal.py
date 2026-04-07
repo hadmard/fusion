@@ -1,17 +1,16 @@
-"""
+﻿"""
 文件说明：本文件实现当前仓库的跨模态融合模块。
-功能说明：在“UV 为主模态、White 为辅助模态”的前提下，同时保留旧版 dense 兼容层，
-并提供同网格多特征的顺序采样点融合主路径。
+功能说明：在“UV 为主模态、White 为辅助模态”的前提下，保留一对一兼容融合接口，
+并新增“同网格、多深度、顺序跨模态融合”主路径。
 
 结构概览：
   第一部分：导入依赖与常量
   第二部分：通用张量工具
-  第三部分：旧版 dense 跨模态读取块与通道投影
+  第三部分：单次跨模态读取块与通道投影
   第四部分：深度 attention residual 聚合
-  第五部分：采样点跨模态读取块
-  第六部分：旧版一对一融合兼容层
-  第七部分：顺序多层级跨模态融合
-  第八部分：兼容别名
+  第五部分：旧版一对一融合兼容层
+  第六部分：顺序多层级跨模态融合
+  第七部分：兼容别名
 """
 
 # ========== 第一部分：导入依赖与常量 ==========
@@ -21,10 +20,15 @@ from typing import Any, Sequence
 
 import torch
 from torch import nn
-from rfdetr.models.ops.modules import MSDeformAttn
 
 FUSION_DIM = 256
 EXPECTED_FUSION_LEVELS = 4
+SAME_LEVEL_FIRST_READ_ORDERS = (
+    (0, 1, 2, 3),
+    (1, 0, 2, 3),
+    (2, 1, 3, 0),
+    (3, 2, 1, 0),
+)
 
 
 # ========== 第二部分：通用张量工具 ==========
@@ -37,7 +41,7 @@ def _to_tokens(x: torch.Tensor) -> tuple[torch.Tensor, dict[str, Any]]:
       - [B, C, H, W]：flatten 成 [B, HW, C]
     """
     if x.dim() == 3:
-        return x, {"layout": "tokens", "num_tokens": x.shape[1]}
+        return x, {"layout": "tokens"}
 
     if x.dim() == 4:
         b, c, h, w = x.shape
@@ -120,123 +124,6 @@ def _rms_norm_last_dim(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     """
     rms = x.pow(2).mean(dim=-1, keepdim=True).add(eps).rsqrt()
     return x * rms
-
-
-def _build_reference_points_from_query_layout(
-    *,
-    layout_metadata: dict[str, Any],
-    batch_size: int,
-    num_memory_levels: int,
-    device: torch.device,
-    dtype: torch.dtype,
-) -> torch.Tensor:
-    """
-    为 UV 查询网格生成归一化 reference points。
-
-    第一版只支持规则网格语义：
-      - 如果输入是 [B, C, H, W]，直接使用 H/W
-      - 如果输入是 token 序列，则要求 token 数是完全平方数，便于回退成规则网格
-    """
-    layout = layout_metadata["layout"]
-    if layout == "grid":
-        height = int(layout_metadata["height"])
-        width = int(layout_metadata["width"])
-    elif layout == "tokens":
-        num_tokens = int(layout_metadata["num_tokens"])
-        side = int(round(float(num_tokens) ** 0.5))
-        if side * side != num_tokens:
-            raise ValueError(
-                "Deformable fusion v1 expects token inputs to form a square grid. "
-                f"Got {num_tokens} tokens."
-            )
-        height = side
-        width = side
-    else:
-        raise ValueError(f"Unsupported layout metadata: {layout_metadata}.")
-
-    y_coords = (torch.arange(height, device=device, dtype=dtype) + 0.5) / float(height)
-    x_coords = (torch.arange(width, device=device, dtype=dtype) + 0.5) / float(width)
-    yy, xx = torch.meshgrid(y_coords, x_coords, indexing="ij")
-    query_points = torch.stack((xx.reshape(-1), yy.reshape(-1)), dim=-1)
-    return query_points.unsqueeze(0).unsqueeze(2).repeat(batch_size, 1, num_memory_levels, 1)
-
-
-def _flatten_multi_level_memory_for_ms_deform_attn(
-    memory_features: Sequence[torch.Tensor],
-    memory_masks: Sequence[torch.Tensor | None] | None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
-    """
-    将多路 White feature 组织成 MSDeformAttn 需要的输入格式。
-    """
-    feature_list = list(memory_features)
-    if not feature_list:
-        raise ValueError("memory_features must contain at least one tensor.")
-
-    mask_list = _normalize_mask_group(
-        masks=memory_masks,
-        expected_length=len(feature_list),
-    )
-
-    flattened_features: list[torch.Tensor] = []
-    flattened_masks: list[torch.Tensor | None] = []
-    spatial_shapes: list[tuple[int, int]] = []
-
-    reference_batch_size = feature_list[0].shape[0]
-    reference_channels = feature_list[0].shape[1]
-
-    for index, (feature, mask) in enumerate(zip(feature_list, mask_list)):
-        if feature.dim() != 4:
-            raise ValueError(
-                f"memory_features[{index}] must be [B, C, H, W], got {tuple(feature.shape)}."
-            )
-
-        batch_size, channels, height, width = feature.shape
-        if batch_size != reference_batch_size:
-            raise ValueError(
-                "All memory feature levels must share the same batch size. "
-                f"Got {batch_size} at index {index}, expected {reference_batch_size}."
-            )
-        if channels != reference_channels:
-            raise ValueError(
-                "All memory feature levels must share the same channel dimension. "
-                f"Got {channels} at index {index}, expected {reference_channels}."
-            )
-
-        spatial_shapes.append((height, width))
-        flattened_features.append(feature.flatten(2).transpose(1, 2).contiguous())
-
-        flattened_masks.append(_flatten_padding_mask(mask))
-
-    input_flatten = torch.cat(flattened_features, dim=1)
-    input_spatial_shapes = torch.as_tensor(
-        spatial_shapes,
-        dtype=torch.long,
-        device=input_flatten.device,
-    )
-    level_sizes = input_spatial_shapes.prod(1)
-    input_level_start_index = torch.cat(
-        (
-            level_sizes.new_zeros((1,)),
-            level_sizes.cumsum(0)[:-1],
-        )
-    )
-
-    if all(mask is None for mask in flattened_masks):
-        input_padding_mask = None
-    else:
-        input_padding_mask = torch.cat(
-            [
-                mask if mask is not None else torch.zeros(
-                    (reference_batch_size, height * width),
-                    dtype=torch.bool,
-                    device=input_flatten.device,
-                )
-                for mask, (height, width) in zip(flattened_masks, spatial_shapes)
-            ],
-            dim=1,
-        )
-
-    return input_flatten, input_spatial_shapes, input_level_start_index, input_padding_mask
 
 
 def _normalize_feature_group(
@@ -407,74 +294,6 @@ class CrossModalFusionBlock(nn.Module):
 
 
 # ========== 第四部分：深度 attention residual 聚合 ==========
-class DeformableCrossModalReadBlock(nn.Module):
-    """
-    单次 UV-conditioned White 采样点读取块。
-
-    这个块只负责“从 White 多特征 memory 里取证据”，不负责跨层历史聚合。
-    采样位置由 `MSDeformAttn` 学习，外部只提供 UV 网格对应的 reference points。
-    """
-
-    def __init__(
-        self,
-        dim: int,
-        num_heads: int = 8,
-        num_levels: int = EXPECTED_FUSION_LEVELS,
-        num_points: int = 4,
-        dropout: float = 0.0,
-    ):
-        super().__init__()
-
-        if dim % num_heads != 0:
-            raise ValueError(
-                f"Feature dim ({dim}) must be divisible by num_heads ({num_heads})."
-            )
-
-        self.query_norm = nn.LayerNorm(dim)
-        self.memory_norm = nn.LayerNorm(dim)
-        self.cross_attn = MSDeformAttn(
-            d_model=dim,
-            n_levels=num_levels,
-            n_heads=num_heads,
-            n_points=num_points,
-        )
-        self.dropout = nn.Dropout(dropout)
-
-    def normalize_memory_tokens(self, memory_flatten: torch.Tensor) -> torch.Tensor:
-        """
-        对共享 White memory 做一次通道归一化。
-
-        之所以单独拆出来，是因为同一个 UV level 内多次 read 会重复访问同一份
-        flatten White memory，没有必要在每一轮 read 里重复做同样的 LayerNorm。
-        """
-        return self.memory_norm(memory_flatten)
-
-    def forward_tokens(
-        self,
-        query_tokens: torch.Tensor,
-        reference_points: torch.Tensor,
-        memory_flatten: torch.Tensor,
-        memory_spatial_shapes: torch.Tensor,
-        memory_level_start_index: torch.Tensor,
-        memory_padding_mask: torch.Tensor | None = None,
-        memory_is_normalized: bool = False,
-    ) -> torch.Tensor:
-        _validate_modal_shapes(query_tokens, memory_flatten)
-
-        query_tokens = self.query_norm(query_tokens)
-        if not memory_is_normalized:
-            memory_flatten = self.memory_norm(memory_flatten)
-        attn_out = self.cross_attn(
-            query=query_tokens,
-            reference_points=reference_points,
-            input_flatten=memory_flatten,
-            input_spatial_shapes=memory_spatial_shapes,
-            input_level_start_index=memory_level_start_index,
-            input_padding_mask=memory_padding_mask,
-        )
-        return self.dropout(attn_out)
-
-
 class DepthAttentionResidual(nn.Module):
     """
     使用 learnable pseudo-query 在深度方向聚合历史状态。
@@ -723,141 +542,14 @@ class SequentialCrossModalFusionLevel(nn.Module):
         return _restore_layout(fused_tokens, uv_layout)
 
 
-class DeformableSequentialCrossModalFusionLevel(nn.Module):
-    """
-    主路径版本的单个 UV 分支融合层。
-
-    结构是：
-      UV 当前状态 -> AttnResidual 取历史状态 -> MSDeformAttn 从 4 路 White memory 采样
-      -> 把每次采样结果重新放回历史 -> 最后再做一次 AttnResidual 聚合
-    """
-
-    def __init__(
-        self,
-        input_dim: int,
-        fusion_dim: int = FUSION_DIM,
-        num_heads: int = 8,
-        num_reads: int = 4,
-        num_points: int = 4,
-        mlp_ratio: float = 4.0,
-        dropout: float = 0.0,
-    ):
-        super().__init__()
-
-        if num_reads < 1:
-            raise ValueError(f"num_reads must be >= 1, got {num_reads}.")
-
-        self.num_reads = num_reads
-        self.num_memory_levels = EXPECTED_FUSION_LEVELS
-        self.input_projector = ChannelProjector(input_dim, fusion_dim)
-        self.output_projector = ChannelProjector(fusion_dim, input_dim)
-        self.read_block = DeformableCrossModalReadBlock(
-            dim=fusion_dim,
-            num_heads=num_heads,
-            num_levels=self.num_memory_levels,
-            num_points=num_points,
-            dropout=dropout,
-        )
-        self.depth_residual = DepthAttentionResidual(dim=fusion_dim, num_queries=num_reads)
-
-        mlp_hidden_dim = int(fusion_dim * mlp_ratio)
-        self.final_ffn_norm = nn.LayerNorm(fusion_dim)
-        self.final_ffn = nn.Sequential(
-            nn.Linear(fusion_dim, mlp_hidden_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(mlp_hidden_dim, fusion_dim),
-            nn.Dropout(dropout),
-        )
-
-    def forward(
-        self,
-        uv: torch.Tensor,
-        projected_white_features: Sequence[torch.Tensor],
-        uv_padding_mask: torch.Tensor | None = None,
-        white_padding_masks: Sequence[torch.Tensor | None] | None = None,
-        shared_reference_points: torch.Tensor | None = None,
-        shared_memory_inputs: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None] | None = None,
-    ) -> torch.Tensor:
-        white_feature_list = _normalize_feature_group(
-            name="projected_white_features",
-            features=projected_white_features,
-            expected_length=self.num_memory_levels,
-        )
-        white_mask_list = _normalize_mask_group(
-            masks=white_padding_masks,
-            expected_length=self.num_memory_levels,
-        )
-
-        uv_tokens, uv_layout = _to_tokens(uv)
-        uv_mask = _flatten_padding_mask(uv_padding_mask)
-        h0 = self.input_projector.forward_tokens(uv_tokens)
-        h0 = _apply_padding_mask(h0, uv_mask)
-
-        if shared_reference_points is None:
-            reference_points = _build_reference_points_from_query_layout(
-                layout_metadata=uv_layout,
-                batch_size=h0.shape[0],
-                num_memory_levels=self.num_memory_levels,
-                device=h0.device,
-                dtype=h0.dtype,
-            )
-        else:
-            reference_points = shared_reference_points
-
-        if shared_memory_inputs is None:
-            memory_flatten, memory_spatial_shapes, memory_level_start_index, memory_padding_mask = (
-                _flatten_multi_level_memory_for_ms_deform_attn(
-                    memory_features=white_feature_list,
-                    memory_masks=white_mask_list,
-                )
-            )
-        else:
-            memory_flatten, memory_spatial_shapes, memory_level_start_index, memory_padding_mask = shared_memory_inputs
-
-        normalized_memory_flatten = self.read_block.normalize_memory_tokens(memory_flatten)
-
-        history_states = [h0]
-        for read_index in range(self.num_reads):
-            if read_index == 0:
-                current_state = h0
-            else:
-                current_state = self.depth_residual(
-                    history_states=history_states,
-                    query_index=read_index - 1,
-                    padding_mask=uv_mask,
-                )
-
-            zi = self.read_block.forward_tokens(
-                query_tokens=current_state,
-                reference_points=reference_points,
-                memory_flatten=normalized_memory_flatten,
-                memory_spatial_shapes=memory_spatial_shapes,
-                memory_level_start_index=memory_level_start_index,
-                memory_padding_mask=memory_padding_mask,
-                memory_is_normalized=True,
-            )
-            history_states.append(_apply_padding_mask(zi, uv_mask))
-
-        h_out = self.depth_residual(
-            history_states=history_states,
-            query_index=self.num_reads - 1,
-            padding_mask=uv_mask,
-        )
-        fused_tokens = h_out + self.final_ffn(self.final_ffn_norm(h_out))
-        fused_tokens = self.output_projector.forward_tokens(fused_tokens)
-        fused_tokens = _apply_padding_mask(fused_tokens, uv_mask)
-        return _restore_layout(fused_tokens, uv_layout)
-
-
 class MultiLevelCrossModalFusion(nn.Module):
     """
-    管理 4 路 UV 与 4 路 White 的同网格跨模态融合。
+    管理 4 路 UV 与 4 路 White 的同网格顺序跨模态融合。
 
     第一版明确只支持：
       - 4 路 encoder depth features
-      - 每个 UV level 独立多轮读取同一组 4 路 White memory
-      - projector 后主链接口保持不变
+      - same-level-first 固定读取顺序
+      - 每个 UV level 独立去读 White 的 4 个 level
     """
 
     def __init__(
@@ -873,23 +565,28 @@ class MultiLevelCrossModalFusion(nn.Module):
         input_dim_list = list(input_dims)
         if len(input_dim_list) != EXPECTED_FUSION_LEVELS:
             raise ValueError(
-                "Deformable same-grid fusion expects exactly 4 encoder feature levels. "
+                "Sequential same-grid fusion v1 expects exactly 4 encoder feature levels. "
                 f"Got {len(input_dim_list)} levels."
             )
 
-        if num_reads < 1:
-            raise ValueError(f"num_reads must be >= 1, got {num_reads}.")
+        if num_reads != EXPECTED_FUSION_LEVELS:
+            raise ValueError(
+                "Sequential same-grid fusion v1 uses exactly 4 reads so it can query "
+                "W2/W5/W8/W11 in a fixed order. "
+                f"Got num_reads={num_reads}."
+            )
 
         self.white_projectors = nn.ModuleList(
             [ChannelProjector(in_dim=dim, out_dim=fusion_dim) for dim in input_dim_list]
         )
         self.level_fusions = nn.ModuleList(
             [
-                DeformableSequentialCrossModalFusionLevel(
+                SequentialCrossModalFusionLevel(
                     input_dim=input_dim_list[level_index],
                     fusion_dim=fusion_dim,
                     num_heads=num_heads,
                     num_reads=num_reads,
+                    read_order=SAME_LEVEL_FIRST_READ_ORDERS[level_index],
                     dropout=dropout,
                 )
                 for level_index in range(EXPECTED_FUSION_LEVELS)
@@ -929,18 +626,6 @@ class MultiLevelCrossModalFusion(nn.Module):
             projector(feature)
             for projector, feature in zip(self.white_projectors, white_feature_list)
         ]
-        _, reference_layout = _to_tokens(uv_feature_list[0])
-        shared_reference_points = _build_reference_points_from_query_layout(
-            layout_metadata=reference_layout,
-            batch_size=uv_feature_list[0].shape[0],
-            num_memory_levels=EXPECTED_FUSION_LEVELS,
-            device=projected_white_features[0].device,
-            dtype=projected_white_features[0].dtype,
-        )
-        shared_memory_inputs = _flatten_multi_level_memory_for_ms_deform_attn(
-            memory_features=projected_white_features,
-            memory_masks=white_mask_list,
-        )
 
         fused_features: list[torch.Tensor] = []
         for level_index, level_fusion in enumerate(self.level_fusions):
@@ -949,8 +634,6 @@ class MultiLevelCrossModalFusion(nn.Module):
                 projected_white_features=projected_white_features,
                 uv_padding_mask=uv_mask_list[level_index],
                 white_padding_masks=white_mask_list,
-                shared_reference_points=shared_reference_points,
-                shared_memory_inputs=shared_memory_inputs,
             )
             fused_features.append(fused_feature)
 

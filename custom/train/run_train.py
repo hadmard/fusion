@@ -6,14 +6,13 @@
 
 """
 文件说明：本文件是当前 `custom/train` 下的统一训练启动器。
-功能说明：集中维护双模态与 UV-only 两种实验模式共享的大部分训练参数，并在运行时按
-模式切换数据集补丁、融合配置、输出目录与日志前缀，减少两套脚本长期漂移。
+功能说明：集中维护当前仓库双模态训练主路径使用的参数，并统一组织输出目录与日志前缀，
+避免训练入口继续保留已经不再维护的单模态分支。
 
 结构概览：
   第一部分：导入依赖与路径初始化
   第二部分：实验参数区
-  第三部分：模式解析
-  第四部分：训练主流程
+  第三部分：训练主流程
 """
 
 from __future__ import annotations
@@ -23,7 +22,6 @@ import sys
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT) not in sys.path:
@@ -42,8 +40,6 @@ NUM_CLASSES = 3
 
 # Model
 PRETRAIN_WEIGHTS = "rf-detr-base.pth"
-MODALITY_MODE = "dual_uv_white"
-SUPPORTED_MODALITY_MODES = {"dual_uv_white", "uv_only"}
 USE_WHITE = True
 FUSION_TYPE = "uv_queries_white"
 FUSION_NUM_LAYERS = 4
@@ -94,67 +90,24 @@ PERSISTENT_WORKERS = True
 PREFETCH_FACTOR = 2
 
 # Output
-OUTPUT_BASE_DIRS = {
-    "dual_uv_white": "output/train",
-    "uv_only": "output/train_uv",
-}
+OUTPUT_BASE_DIR = "output/train"
 
 
-# ========== 第三部分：模式解析 ==========
-def _resolve_mode_settings(modality_mode: str) -> dict[str, Any]:
-    """
-    把模式名解析成训练主流程真正需要的一组开关。
-
-    这里不直接把 `DUAL_MODAL`、`USE_WHITE` 等常量散落在多个脚本里，
-    是为了让 UV-only 与双模态只在入口层做一次分流，避免参数漂移。
-    """
-    if modality_mode not in SUPPORTED_MODALITY_MODES:
-        raise ValueError(
-            f"Unsupported modality mode '{modality_mode}'. "
-            f"Expected one of {sorted(SUPPORTED_MODALITY_MODES)}."
-        )
-
-    if modality_mode == "uv_only":
-        return {
-            "dual_modal": False,
-            "use_white": False,
-            "fusion_type": "none",
-            "output_base_dir": OUTPUT_BASE_DIRS["uv_only"],
-            "log_prefix": "[Train-UV]",
-        }
-
-    return {
-        "dual_modal": True,
-        "use_white": USE_WHITE,
-        "fusion_type": FUSION_TYPE,
-        "output_base_dir": OUTPUT_BASE_DIRS["dual_uv_white"],
-        "log_prefix": "[Train]",
-    }
-
-
-# ========== 第四部分：训练主流程 ==========
+# ========== 第三部分：训练主流程 ==========
 def run_training(
-    modality_mode: str | None = None,
     output_base_dir: str | None = None,
     log_prefix: str | None = None,
 ):
-    """按指定模式启动训练，并返回本次运行的输出目录。"""
+    """启动双模态训练，并返回本次运行的输出目录。"""
     from rfdetr.config import RFDETRBaseConfig
     from rfdetr.main import Model
 
-    resolved_mode = modality_mode or MODALITY_MODE
-    mode_settings = _resolve_mode_settings(resolved_mode)
-    dual_modal = bool(mode_settings["dual_modal"])
-    use_white = bool(mode_settings["use_white"])
-    fusion_type = str(mode_settings["fusion_type"])
-    output_dir_base = output_base_dir or str(mode_settings["output_base_dir"])
-    log_tag = log_prefix or str(mode_settings["log_prefix"])
-
-    if not dual_modal:
-        # UV-only 仍复用 paired dataset 根目录，因此需要在启动前补齐数据与模型兼容补丁。
-        from custom.train.uv_only_support import patch_uv_only_training_support
-
-        patch_uv_only_training_support()
+    # 当前入口明确只保留双模态主路径，避免“单模态也还能顺手跑”带来的配置漂移。
+    dual_modal = True
+    use_white = USE_WHITE
+    fusion_type = FUSION_TYPE
+    output_dir_base = output_base_dir or OUTPUT_BASE_DIR
+    log_tag = log_prefix or "[Train]"
 
     resume_path = RESUME
     if resume_path:
@@ -244,7 +197,7 @@ def run_training(
 
     effective_batch = BATCH_SIZE * GRAD_ACCUM_STEPS
     print(
-        f"{log_tag} mode={resolved_mode}, resolution={RESOLUTION}, epochs={EPOCHS}, "
+        f"{log_tag} resolution={RESOLUTION}, epochs={EPOCHS}, "
         f"batch={BATCH_SIZE}x{GRAD_ACCUM_STEPS}={effective_batch}, "
         f"max_train_batches={MAX_TRAIN_BATCHES}, max_val_batches={MAX_VAL_BATCHES}, "
         f"lr={LR}, scheduler={LR_SCHEDULER}, workers={NUM_WORKERS}, "

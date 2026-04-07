@@ -1,4 +1,4 @@
-
+﻿
 """
 文件说明：融合的执行模块，具体思路模块是cross_attn那个文件
 功能：保持 RF-DETR 主体结构不大改的前提下，引入 UV 主模态、White 辅助模态的双输入前向，
@@ -20,7 +20,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from custom.cross_modal import MultiLevelCrossModalFusion
+from .cross_modal import MultiLevelCrossModalFusion
 from rfdetr.models.backbone import build_backbone
 from rfdetr.models.lwdetr import LWDETR
 from rfdetr.models.segmentation_head import SegmentationHead
@@ -101,8 +101,6 @@ class DualModalLWDETR(LWDETR):
             MultiLevelCrossModalFusion(
                 input_dims=encoder_feature_dims,
                 num_heads=fusion_num_heads,
-                # 当前 deformable 主路径里，4 路 White memory 数量由融合模块内部固定约束；
-                # 这里的 fusion_num_layers 只表示“每个 UV 分支内部读几轮 White memory”。
                 num_reads=fusion_num_layers,
             )
             if self.fusion_enabled
@@ -356,6 +354,21 @@ class DualModalLWDETR(LWDETR):
                     out["pred_masks"] = masks_enc
 
         return out
+
+    def update_drop_path(self, drop_path_rate, vit_encoder_num_layers):
+        """
+        根据当前 RF-DETR / windowed DINOv2 的层级路径更新 drop-path。
+
+        这里覆写父类实现，是因为当前 backbone 的层路径和原始实现略有不同。
+        """
+        dp_rates = [x.item() for x in torch.linspace(0, drop_path_rate, vit_encoder_num_layers)]
+        encoder = self.backbone[0].encoder
+        layers = encoder.encoder.encoder.layer
+
+        for i in range(min(vit_encoder_num_layers, len(layers))):
+            if hasattr(layers[i], "drop_path") and hasattr(layers[i].drop_path, "drop_prob"):
+                layers[i].drop_path.drop_prob = dp_rates[i]
+
 
 # ========== 第三部分：模型构建函数 ==========
 def build_dual_model(args):

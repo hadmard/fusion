@@ -1,4 +1,4 @@
-"""
+﻿"""
 文件说明：本文件是 `custom/` 目录下的内部评估核心，不作为日常直接使用的入口。
 功能说明：负责加载单个权重并在成对测试集上计算统一指标，供根目录 `eval/run_eval_*.py` 调用。
 
@@ -51,7 +51,9 @@ from custom import prepare_project_environment
 PROJECT_ROOT = prepare_project_environment(change_cwd=True)
 
 from custom.dual_dataset import load_class_names, parse_yolo_label
-from custom.historical_eval_loader import build_checkpoint_runtime
+from custom.dual_model import build_dual_model
+from custom.rfdetr_compat import Model, populate_args
+from custom.legacy_gate_model import build_legacy_gate_dual_model
 from custom.model_registry import resolve_model_checkpoint_path
 from rfdetr.evaluation.coco_eval import patched_pycocotools_summarize
 from rfdetr.models.lwdetr import PostProcess
@@ -335,17 +337,34 @@ def _load_checkpoint_runtime(
     fusion_num_layers = int(_safe_getattr(checkpoint_args, "fusion_num_layers", 1))
     resolution = int(_safe_getattr(checkpoint_args, "resolution", 560))
 
-    model, postprocess, architecture_variant = build_checkpoint_runtime(
-        checkpoint=checkpoint,
-        checkpoint_path=checkpoint_path,
-        class_names=class_names,
-        resolution=resolution,
-        device=device,
-        use_white=use_white,
-        fusion_type=fusion_type,
-        fusion_num_layers=fusion_num_layers,
-        dual_modal=dual_modal,
-    )
+    legacy_gate = _checkpoint_uses_legacy_gate(checkpoint=checkpoint)
+
+    if legacy_gate:
+        model, postprocess = _build_legacy_gate_runtime(
+            checkpoint=checkpoint,
+            checkpoint_path=checkpoint_path,
+            class_names=class_names,
+            resolution=resolution,
+            device=device,
+            use_white=use_white,
+            fusion_type=fusion_type,
+            fusion_num_layers=fusion_num_layers,
+        )
+    else:
+        model_wrapper = Model(
+            num_classes=len(class_names),
+            class_names=class_names,
+            pretrain_weights=str(checkpoint_path),
+            resolution=resolution,
+            use_white=use_white,
+            fusion_type=fusion_type,
+            fusion_num_layers=fusion_num_layers,
+            device=device,
+            dual_modal=dual_modal,
+        )
+        model = model_wrapper.model.to(device)
+        model.eval()
+        postprocess = model_wrapper.postprocess
 
 
     runtime_meta = {
@@ -358,9 +377,74 @@ def _load_checkpoint_runtime(
         "fusion_num_layers": fusion_num_layers,
         "dual_modal": dual_modal,
         "device": device,
-        "architecture_variant": architecture_variant,
+        "architecture_variant": "legacy_gate" if legacy_gate else "current",
     }
     return model, postprocess, runtime_meta
+
+
+def _checkpoint_uses_legacy_gate(checkpoint: dict[str, Any]) -> bool:
+    """
+    通过历史门控专有参数判断 checkpoint 是否属于旧门控实现。
+    这里不靠文件名猜测，避免用户后续改名后再次失效。
+    """
+    model_state = checkpoint.get("model", {})
+    return any(
+        key.endswith("alpha_attn") or key.endswith("alpha_ffn")
+        for key in model_state
+    )
+
+
+def _build_legacy_gate_runtime(
+    checkpoint: dict[str, Any],
+    checkpoint_path: Path,
+    class_names: list[str],
+    resolution: int,
+    device: str,
+    use_white: bool,
+    fusion_type: str,
+    fusion_num_layers: int,
+) -> tuple[torch.nn.Module, PostProcess]:
+    """
+    历史门控权重需要先按旧结构建模，再复用当前统一评估口径。
+    这里刻意只替换建模与权重加载语义，不改后续 AP/F1/FPS 统计逻辑。
+    """
+    checkpoint_args = checkpoint.get("args")
+    args_dict = vars(checkpoint_args).copy() if checkpoint_args is not None else {}
+    args_dict.update(
+        {
+            "num_classes": len(class_names),
+            "class_names": class_names,
+            "pretrain_weights": None,
+            "resolution": resolution,
+            "device": device,
+            "dual_modal": True,
+            "use_white": use_white,
+            "fusion_type": fusion_type,
+            "fusion_num_layers": fusion_num_layers,
+        }
+    )
+    args = populate_args(**args_dict)
+    model = build_legacy_gate_dual_model(args).to(device)
+
+    model_state = checkpoint["model"].copy()
+    num_desired_queries = int(args.num_queries) * int(args.group_detr)
+    for name in list(model_state.keys()):
+        if name.endswith("refpoint_embed.weight") or name.endswith("query_feat.weight"):
+            model_state[name] = model_state[name][:num_desired_queries]
+
+    checkpoint_num_classes = int(model_state["class_embed.bias"].shape[0])
+    if checkpoint_num_classes != args.num_classes + 1:
+        model.reinitialize_detection_head(checkpoint_num_classes)
+
+    model.load_state_dict(model_state, strict=False)
+
+    if checkpoint_num_classes != args.num_classes + 1:
+        model.reinitialize_detection_head(args.num_classes + 1)
+
+    model = model.to(device)
+    model.eval()
+    postprocess = PostProcess(num_select=args.num_select)
+    return model, postprocess
 
 
 def _load_and_preprocess_pair(
