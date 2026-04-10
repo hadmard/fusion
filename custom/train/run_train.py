@@ -83,7 +83,7 @@ SQUARE_RESIZE_DIV_64 = True
 EVAL_MAX_DETS = 500
 RUN_TEST = False
 # 恢复到正常训练阶段更常用的 worker 数；若本地 spawn 不稳可再手动降回 0。
-NUM_WORKERS = 4
+NUM_WORKERS = 8
 DEVICE = "cuda"
 PIN_MEMORY = True
 PERSISTENT_WORKERS = True
