@@ -20,6 +20,8 @@ MODEL_DIR = EVAL_DIR / "model"
 
 # 常用别名集中放在这里，避免脚本层各自散落硬编码。
 MODEL_NAME_ALIASES = {
+    "ema_defor": "ema_defor.pth",
+    "ema_defor.pth": "ema_defor.pth",
     "bestema": "checkpoint_best_ema.pth",
     "bestema.pth": "checkpoint_best_ema.pth",
     "high_resolution": "high_resolution.pth",
@@ -28,6 +30,8 @@ MODEL_NAME_ALIASES = {
     "menkong": "menkong.pth",
     "multi_feature": "multi_feature.pth",
     "multi_feature.pth": "multi_feature.pth",
+    "regular_defor": "regular_defor.pth",
+    "regular_defor.pth": "regular_defor.pth",
     "uv_single": "uv_single.pth",
 }
 

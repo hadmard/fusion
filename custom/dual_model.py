@@ -92,6 +92,7 @@ class DualModalLWDETR(LWDETR):
         self.fusion_type = fusion_type
 
         self.fusion_enabled = self.use_white and self.fusion_type == "uv_queries_white"
+        self.projector_scales = tuple(backbone[0].projector_scale)
 
         # 融合点前移到 projector 之前，因此这里直接按 encoder 输出层级创建
         # “整组 UV / White” 的顺序跨模态融合模块。
@@ -191,6 +192,11 @@ class DualModalLWDETR(LWDETR):
         projected_tensors = self.backbone[0].projector(
             [feature.tensors for feature in encoder_features]
         )
+        if len(projected_tensors) != len(self.projector_scales):
+            raise RuntimeError(
+                "Projector output level count does not match configured projector_scale. "
+                f"Expected {len(self.projector_scales)}, got {len(projected_tensors)}."
+            )
         projected_features: List[NestedTensor] = []
         pos_embeddings: List[torch.Tensor] = []
 

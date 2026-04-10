@@ -5,9 +5,9 @@
 # ------------------------------------------------------------------------
 
 """
-文件说明：本文件是当前 `custom/train` 下的统一训练启动器。
-功能说明：集中维护当前仓库双模态训练主路径使用的参数，并统一组织输出目录与日志前缀，
-避免训练入口继续保留已经不再维护的单模态分支。
+文件说明：本文件是当前双模态训练主线的统一启动入口。
+功能说明：集中维护当前实验主线使用的参数，并显式定义当前结构与预训练策略的关系，
+避免训练入口继续混入已经不再使用的旧结构假设。
 
 结构概览：
   第一部分：导入依赖与路径初始化
@@ -32,6 +32,7 @@ from custom import prepare_project_environment
 # ========== 第一部分：导入依赖与路径初始化 ==========
 prepare_project_environment(change_cwd=True)
 
+
 # ========== 第二部分：实验参数区 ==========
 # Dataset
 DATASET_DIR = "datasets"
@@ -43,18 +44,14 @@ PRETRAIN_WEIGHTS = "rf-detr-base.pth"
 USE_WHITE = True
 FUSION_TYPE = "uv_queries_white"
 FUSION_NUM_LAYERS = 4
+PROJECTOR_SCALE = ["P3", "P4"]
 RESOLUTION = 672
+POSITIONAL_ENCODING_SIZE = 37
 
 # Resume
 RESUME = ""
 
 # Training
-# 当前默认参数按这台 9800X3D + 96GB RAM + RTX 5090 机器的“稳健长跑”思路收紧：
-# - 先把默认训练分辨率从 560 提到 672，优先改善 PM 小目标可见性
-# - 672 是 56 的整数倍，和 patch_size=14、num_windows=4 的窗口约束兼容
-# - 保持 batch=6 不动
-# - 用 grad accum 把有效 batch 提到 12，而不是继续放大单卡 batch
-# - warmup 拉长一点，给双模态和多尺度更稳的起步空间
 EPOCHS = 160
 BATCH_SIZE = 6
 GRAD_ACCUM_STEPS = 2
@@ -82,8 +79,8 @@ SQUARE_RESIZE_DIV_64 = True
 # Runtime
 EVAL_MAX_DETS = 500
 RUN_TEST = False
-# 恢复到正常训练阶段更常用的 worker 数；若本地 spawn 不稳可再手动降回 0。
-NUM_WORKERS = 8
+# Windows 下 dataloader 多进程更容易触发 spawn 问题，默认更保守。
+NUM_WORKERS = 4 if os.name == "nt" else 8
 DEVICE = "cuda"
 PIN_MEMORY = True
 PERSISTENT_WORKERS = True
@@ -94,6 +91,19 @@ OUTPUT_BASE_DIR = "output/train"
 
 
 # ========== 第三部分：训练主流程 ==========
+def _resolve_pretrain_weights(projector_scale: list[str]) -> str | None:
+    """
+    当前 RF-DETR 整模型预训练权重只匹配单 `P4` 检测头结构。
+
+    当前实验主线改成 `P3 + P4` 后，继续加载整模型权重会在 projector 与 decoder
+    deformable attention 上发生 shape mismatch。因此这里显式回退到
+    `pretrain_weights=None`，只保留 DINOv2 backbone 预训练。
+    """
+    if list(projector_scale) != ["P4"]:
+        return None
+    return PRETRAIN_WEIGHTS
+
+
 def run_training(
     output_base_dir: str | None = None,
     log_prefix: str | None = None,
@@ -102,10 +112,10 @@ def run_training(
     from rfdetr.config import RFDETRBaseConfig
     from rfdetr.main import Model
 
-    # 当前入口明确只保留双模态主路径，避免“单模态也还能顺手跑”带来的配置漂移。
     dual_modal = True
     use_white = USE_WHITE
     fusion_type = FUSION_TYPE
+    pretrain_weights = _resolve_pretrain_weights(PROJECTOR_SCALE)
     output_dir_base = output_base_dir or OUTPUT_BASE_DIR
     log_tag = log_prefix or "[Train]"
 
@@ -120,15 +130,15 @@ def run_training(
         os.makedirs(output_dir, exist_ok=True)
         print(f"{log_tag} Output dir: {output_dir}")
 
-    # 先用 RF-DETR 自带配置类产出基础模型参数，再补上 custom 模态开关，
-    # 可以减少和上游 `RFDETRBaseConfig` 的重复维护。
     model_cfg = RFDETRBaseConfig(
         num_classes=NUM_CLASSES,
-        pretrain_weights=PRETRAIN_WEIGHTS,
+        pretrain_weights=pretrain_weights,
         use_white=use_white,
         fusion_type=fusion_type,
         fusion_num_layers=FUSION_NUM_LAYERS,
+        projector_scale=PROJECTOR_SCALE,
         resolution=RESOLUTION,
+        positional_encoding_size=POSITIONAL_ENCODING_SIZE,
     )
     model_kwargs = model_cfg.model_dump()
     model_kwargs["dual_modal"] = dual_modal
@@ -177,8 +187,6 @@ def run_training(
         "square_resize_div_64": SQUARE_RESIZE_DIV_64,
     }
 
-    # 训练入口需要的通用参数手工列出；其余模型结构参数从 config 透传，
-    # 这样后续如果上游配置类新增字段，这里通常不需要同步手改第二遍。
     exclude_keys = {
         "num_classes",
         "pretrain_weights",
@@ -202,8 +210,10 @@ def run_training(
         f"max_train_batches={MAX_TRAIN_BATCHES}, max_val_batches={MAX_VAL_BATCHES}, "
         f"lr={LR}, scheduler={LR_SCHEDULER}, workers={NUM_WORKERS}, "
         f"pin_memory={PIN_MEMORY}, persistent_workers={PERSISTENT_WORKERS}, "
-        f"resume={bool(resume_path)}, "
-        f"dual_modal={dual_modal}, use_white={use_white}, fusion_type={fusion_type}"
+        f"resume={bool(resume_path)}, dual_modal={dual_modal}, "
+        f"use_white={use_white}, fusion_type={fusion_type}, "
+        f"projector_scale={PROJECTOR_SCALE}, "
+        f"pretrain_weights={pretrain_weights or 'dinov2-only'}"
     )
 
     model.train(**train_kwargs)
@@ -213,9 +223,7 @@ def run_training(
 
 def main() -> str:
     """
-    文件说明：提供与 `if __name__ == "__main__"` 解耦的训练脚本入口。
-    功能说明：让模块导入、命令行执行和后续可能的脚本复用都走同一条启动路径，
-    减少入口逻辑散落在文件尾部的情况。
+    与 `if __name__ == "__main__"` 解耦的训练脚本入口。
     """
     return run_training()
 
