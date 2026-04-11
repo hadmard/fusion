@@ -54,7 +54,7 @@ RESUME = ""
 # Training
 EPOCHS = 160
 BATCH_SIZE = 6
-GRAD_ACCUM_STEPS = 2
+GRAD_ACCUM_STEPS = 1
 MAX_TRAIN_BATCHES = 0
 MAX_VAL_BATCHES = 0
 MAX_TEST_BATCHES = 0
@@ -79,7 +79,8 @@ SQUARE_RESIZE_DIV_64 = True
 # Runtime
 EVAL_MAX_DETS = 500
 RUN_TEST = False
-NUM_WORKERS = 4
+# Windows 下 dataloader 多进程更容易触发 spawn 问题，默认更保守。
+NUM_WORKERS = 8
 DEVICE = "cuda"
 PIN_MEMORY = True
 PERSISTENT_WORKERS = True
