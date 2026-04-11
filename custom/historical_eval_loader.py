@@ -94,6 +94,44 @@ def _build_runtime_args(
     return populate_args(**args_dict)
 
 
+def _build_current_runtime_kwargs(
+    *,
+    checkpoint: dict[str, Any],
+    checkpoint_path: Path,
+    class_names: list[str],
+    resolution: int,
+    device: str,
+    use_white: bool,
+    fusion_type: str,
+    fusion_num_layers: int,
+    dual_modal: bool,
+) -> dict[str, Any]:
+    """
+    为 current checkpoint 构建运行时参数，并尽量继承 checkpoint 自带结构配置。
+
+    为什么这里不能只传少量公共参数：
+    - 新一些 current checkpoint 可能已经不再是默认单 `P4` 结构；
+    - 如果评测时退回默认配置，模型会先按错误结构实例化，再在加载 checkpoint 时出现 shape mismatch；
+    - 多尺度 current checkpoint 需要继承 checkpoint 中的 `projector_scale`。
+    """
+    checkpoint_args = checkpoint.get("args")
+    args_dict = vars(checkpoint_args).copy() if checkpoint_args is not None else {}
+    args_dict.update(
+        {
+            "num_classes": len(class_names),
+            "class_names": class_names,
+            "pretrain_weights": str(checkpoint_path),
+            "resolution": resolution,
+            "device": device,
+            "dual_modal": dual_modal,
+            "use_white": use_white,
+            "fusion_type": fusion_type,
+            "fusion_num_layers": fusion_num_layers,
+        }
+    )
+    return args_dict
+
+
 def _build_historical_dual_model(architecture_variant: str, args: Any) -> torch.nn.Module:
     if architecture_variant == ARCH_VARIANT_LEGACY_GATE:
         return build_legacy_gate_dual_model(args)
@@ -161,17 +199,18 @@ def build_checkpoint_runtime(
     architecture_variant = detect_checkpoint_architecture_variant(checkpoint)
 
     if architecture_variant == ARCH_VARIANT_CURRENT:
-        model_wrapper = Model(
-            num_classes=len(class_names),
+        current_runtime_kwargs = _build_current_runtime_kwargs(
+            checkpoint=checkpoint,
+            checkpoint_path=checkpoint_path,
             class_names=class_names,
-            pretrain_weights=str(checkpoint_path),
             resolution=resolution,
+            device=device,
             use_white=use_white,
             fusion_type=fusion_type,
             fusion_num_layers=fusion_num_layers,
-            device=device,
             dual_modal=dual_modal,
         )
+        model_wrapper = Model(**current_runtime_kwargs)
         model = model_wrapper.model.to(device)
         model.eval()
         return model, model_wrapper.postprocess, architecture_variant

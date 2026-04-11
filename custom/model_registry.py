@@ -30,8 +30,6 @@ MODEL_NAME_ALIASES = {
     "menkong": "menkong.pth",
     "multi_feature": "multi_feature.pth",
     "multi_feature.pth": "multi_feature.pth",
-    "regular_defor": "regular_defor.pth",
-    "regular_defor.pth": "regular_defor.pth",
     "uv_single": "uv_single.pth",
 }
 
