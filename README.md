@@ -48,31 +48,17 @@ White 图像 ─→ DINOv2 Encoder ──→ White 特征 [B,C,H,W] ─┘
 ```
 custom/
   cross_modal.py        # 跨模态融合模块（CrossModalFusionBlock / Stack）
-  eval_entry_common.py  # 各个 run_eval_*.py 共享的入口转发层
-  eval_runtime.py       # 评估内部核心实现（供根目录 eval 入口复用）
-  legacy_gate_model.py  # menkong 历史门控结构兼容层
-  model_registry.py     # eval/model/ 权重定位与别名解析
   dual_model.py         # 双模态模型封装（DualModalLWDETR）
   dual_dataset.py       # 双模态数据集（UV + White 配对读取）
   dual_transforms.py    # 双模态数据增强流水线
+  lazystrike.py         # LazyStrike 辅助聚合分支
+  pm_loss.py            # PM / 小目标 loss weighting 补丁
   rfdetr_compat.py      # 自定义训练/验证兼容层（对接 src/rfdetr）
-  uv_dataset.py         # 单模态 UV-only 数据集（消融基线用）
   notes/                # 版本记录、实验记录与思路档案
   train/
     run_train.py        # 双模态训练启动脚本
-    run_train_uv.py     # UV-only 消融训练启动脚本
-detect/
-  image_uv/             # 待检测的 UV 图片
-  image_white/          # 待检测的 White 图片
-  run_detect_kimi.py    # kimi.pth 的双模态检测入口
-  run_detect_menkong.py # menkong.pth 的双模态检测入口
-
-eval/
-  model/                 # 统一存放评估/检测使用的权重文件
-  run_eval_kimi.py      # kimi.pth 的专用评估入口
-  run_eval_menkong.py   # menkong.pth 的专用评估入口
-  run_eval_bestema.py   # checkpoint_best_ema.pth 的专用评估入口
-  run_eval_uv_single.py # uv_single.pth 的专用评估入口
+  archive/              # 归档的历史兼容、专项工具与结果资料
+  docs/                 # 说明型文档
 
 datasets/
   images/               # UV 图像
@@ -130,41 +116,6 @@ python -m custom.train.run_train
 | `BATCH_SIZE` | `6` | 批大小 |
 | `GRAD_ACCUM_STEPS` | `1` | 梯度累积步数 |
 | `LR` | `1.2e-4` | 学习率 |
-
-### 单模态消融训练（UV-only 基线）
-
-```bash
-python -m custom.train.run_train_uv
-```
-
----
-
-## 推理
-
-```bash
-python detect/run_detect_kimi.py
-# 或
-python detect/run_detect_menkong.py
-```
-
-使用前请先把：
-- UV 图片放进 `detect/image_uv/`
-- White 图片放进 `detect/image_white/`
-- 对应权重放进 `eval/model/`
-
-结果保存在 `output/detect/<时间戳>/<模型名>/`，包含：
-- 可视化图像（检测框叠加在 UV 图上）
-- `summary_report.json`
-- `per_image_detections.json`
-
-评估与检测权重现在统一建议放在 `eval/model/` 下。
-例如：
-- `eval/model/kimi.pth`
-- `eval/model/menkong.pth`
-- `eval/model/checkpoint_best_ema.pth`
-
-说明：
-- `rf-detr-base.pth` 是训练初始化权重，不属于评估模型池，不参与 `eval/` 入口。
 
 ---
 

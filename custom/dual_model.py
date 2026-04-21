@@ -21,6 +21,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from custom.cross_modal import MultiLevelCrossModalFusion
+from custom.lazystrike import LazyStrikeAggregator
 from rfdetr.models.backbone import build_backbone
 from rfdetr.models.lwdetr import LWDETR
 from rfdetr.models.segmentation_head import SegmentationHead
@@ -60,6 +61,13 @@ class DualModalLWDETR(LWDETR):
         fusion_type: str = "uv_queries_white",
         fusion_num_heads: int = 8,
         fusion_num_layers: int = 4,
+        lazystrike_enabled: bool = False,
+        lazystrike_num_classes: int = 3,
+        lazystrike_topk: int = 0,
+        lazystrike_topk_ratio: float = 0.25,
+        lazystrike_sigma_scale: float = 1.0,
+        lazystrike_score_numerator: str = "original",
+        lazystrike_apply_to: str = "fused",
     ):
         # 先初始化 RF-DETR 原始主干。
         # 这样可以最大限度复用已有检测头、transformer、two-stage 等逻辑。
@@ -93,6 +101,14 @@ class DualModalLWDETR(LWDETR):
 
         self.fusion_enabled = self.use_white and self.fusion_type == "uv_queries_white"
         self.projector_scales = tuple(backbone[0].projector_scale)
+        self.lazystrike_enabled = bool(lazystrike_enabled)
+        self.lazystrike_apply_to = lazystrike_apply_to
+
+        if self.lazystrike_apply_to not in {"fused", "uv", "white"}:
+            raise ValueError(
+                "lazystrike_apply_to must be one of {'fused', 'uv', 'white'}, "
+                f"got {self.lazystrike_apply_to!r}."
+            )
 
         # 融合点前移到 projector 之前，因此这里直接按 encoder 输出层级创建
         # “整组 UV / White” 的顺序跨模态融合模块。
@@ -107,6 +123,21 @@ class DualModalLWDETR(LWDETR):
                 num_reads=fusion_num_layers,
             )
             if self.fusion_enabled
+            else None
+        )
+        self.lazystrike_aggregator = (
+            LazyStrikeAggregator(
+                topk=lazystrike_topk,
+                topk_ratio=lazystrike_topk_ratio,
+                sigma_scale=lazystrike_sigma_scale,
+                score_numerator=lazystrike_score_numerator,
+            )
+            if self.lazystrike_enabled
+            else None
+        )
+        self.lazystrike_head = (
+            nn.Linear(encoder_feature_dims[-1], lazystrike_num_classes)
+            if self.lazystrike_enabled
             else None
         )
 
@@ -214,6 +245,38 @@ class DualModalLWDETR(LWDETR):
 
         return projected_features, pos_embeddings
 
+    def _compute_lazystrike_outputs(
+        self,
+        encoder_features: List[NestedTensor] | None,
+    ) -> dict[str, torch.Tensor]:
+        """
+        基于 encoder 最后一层 feature 计算论文式 LazyStrike CLS 与诊断热力图。
+
+        为什么使用最后一层：
+        - 论文讨论的是 ViT deep layer patch token 与 CLS 聚合；
+        - 当前 encoder 最后一层语义最强，也最接近论文的 patch representation。
+        """
+        if (
+            not self.lazystrike_enabled
+            or self.lazystrike_aggregator is None
+            or self.lazystrike_head is None
+            or encoder_features is None
+        ):
+            return {}
+
+        if not encoder_features:
+            raise ValueError("LazyStrike requires at least one encoder feature level.")
+
+        feature = encoder_features[-1].tensors
+        lazystrike = self.lazystrike_aggregator(feature)
+        lazy_cls = lazystrike["cls"]
+        return {
+            "lazystrike_cls": lazy_cls,
+            "lazystrike_logits": self.lazystrike_head(lazy_cls),
+            "lazystrike_vote_count": lazystrike["vote_count"],
+            "lazystrike_patch_score": lazystrike["patch_score"],
+        }
+
     def forward(
         self,
         samples_uv: NestedTensor | List[torch.Tensor] | torch.Tensor,
@@ -237,6 +300,7 @@ class DualModalLWDETR(LWDETR):
         # ---------- 第二步：提取 UV 主特征 ----------
         fused_features = None
         pos_uv = None
+        lazystrike_source_features = None
 
         # ---------- 第三步：可选地在 projector 前引入 White 辅助特征 ----------
         if self.fusion_enabled:
@@ -251,12 +315,26 @@ class DualModalLWDETR(LWDETR):
             fused_encoder_features = self._fuse_uv_with_white(
                 uv_encoder_features, white_encoder_features
             )
+            if self.lazystrike_apply_to == "uv":
+                lazystrike_source_features = uv_encoder_features
+            elif self.lazystrike_apply_to == "white":
+                lazystrike_source_features = white_encoder_features
+            else:
+                lazystrike_source_features = fused_encoder_features
             fused_features, pos_uv = self._project_encoder_features(
                 samples_uv, fused_encoder_features
             )
         else:
-            # baseline 路径保持原始 RF-DETR 行为不变。
-            fused_features, pos_uv = self.backbone(samples_uv)
+            if self.lazystrike_enabled:
+                # 需要 LazyStrike 时保留 encoder feature，避免只拿到 projector 后的特征。
+                uv_encoder_features = self._extract_encoder_features(samples_uv)
+                lazystrike_source_features = uv_encoder_features
+                fused_features, pos_uv = self._project_encoder_features(
+                    samples_uv, uv_encoder_features
+                )
+            else:
+                # baseline 路径保持原始 RF-DETR 行为不变。
+                fused_features, pos_uv = self.backbone(samples_uv)
 
         # ---------- 第四步：整理成 transformer 所需的输入 ----------
         srcs = []
@@ -361,6 +439,7 @@ class DualModalLWDETR(LWDETR):
                 if self.segmentation_head is not None:
                     out["pred_masks"] = masks_enc
 
+        out.update(self._compute_lazystrike_outputs(lazystrike_source_features))
         return out
 
 # ========== 第三部分：模型构建函数 ==========
@@ -432,5 +511,12 @@ def build_dual_model(args):
         fusion_type=getattr(args, "fusion_type", "uv_queries_white"),
         fusion_num_heads=getattr(args, "fusion_num_heads", getattr(args, "ca_nheads", 8)),
         fusion_num_layers=getattr(args, "fusion_num_layers", 4),
+        lazystrike_enabled=getattr(args, "lazystrike_enabled", False),
+        lazystrike_num_classes=getattr(args, "num_classes", 3),
+        lazystrike_topk=getattr(args, "lazystrike_topk", 0),
+        lazystrike_topk_ratio=getattr(args, "lazystrike_topk_ratio", 0.25),
+        lazystrike_sigma_scale=getattr(args, "lazystrike_sigma_scale", 1.0),
+        lazystrike_score_numerator=getattr(args, "lazystrike_score_numerator", "original"),
+        lazystrike_apply_to=getattr(args, "lazystrike_apply_to", "fused"),
     )
     return model

@@ -10,10 +10,10 @@
     1. DualRandomHorizontalFlip         p=0.5
        UV 与 White 同步水平翻转，框坐标同步修正。
 
-    2. DualRandomSelect                 p=0.7 走分支A，0.3 走分支B
+    2. DualRandomSelect                 默认 p=0.5 走分支A，0.5 走分支B
        分支A：DualSquareResize — 直接缩放到目标分辨率
        分支B：DualPMFocusCrop（p=1.0，围绕 PM 标签裁剪，
-               scale 0.65~0.95，最少保留 4 框含 1 个 PM）
+               scale 0.30~0.60，最少保留 1 框含 1 个 PM）
               → DualSquareResize — 裁剪后再缩放到目标分辨率
 
   外观增强：
@@ -626,6 +626,12 @@ def make_dual_transforms(
     expanded_scales: bool = False,
     patch_size: int = 16,
     num_windows: int = 4,
+    pm_crop_branch_probability: float = 0.5,
+    pm_crop_min_scale: float = 0.30,
+    pm_crop_max_scale: float = 0.60,
+    pm_crop_min_kept_boxes: int = 1,
+    pm_crop_min_focus_boxes: int = 1,
+    pm_crop_focus_probability: float = 0.9,
 ) -> DualCompose:
     """
     构建与当前阶段匹配的双模态增强。
@@ -655,6 +661,7 @@ def make_dual_transforms(
         print(f"[DualTransforms] multi-scale sizes: {scales}")
 
     if image_set == "train":
+        regular_resize_probability = 1.0 - max(0.0, min(1.0, pm_crop_branch_probability))
         return DualCompose(
             [
                 # ---------- 几何增强 ----------
@@ -665,20 +672,23 @@ def make_dual_transforms(
                         [
                             DualPMFocusCrop(
                                 p=1.0,
-                                min_crop_scale=0.65,
-                                max_crop_scale=0.95,
+                                # PM 当前主要问题是小目标召回不足，所以这里不再做轻微裁剪，
+                                # 而是用更小 crop 把 PM 在 672 输入中实际放大。
+                                min_crop_scale=pm_crop_min_scale,
+                                max_crop_scale=pm_crop_max_scale,
                                 min_aspect=0.85,
                                 max_aspect=1.2,
                                 attempts=12,
-                                min_kept_boxes=4,
+                                # 不再强制保留多个非 PM 框，避免局部放大分支因为密集标注约束过严而失效。
+                                min_kept_boxes=pm_crop_min_kept_boxes,
                                 focus_label=2,
-                                min_focus_boxes=1,
-                                focus_probability=0.8,
+                                min_focus_boxes=pm_crop_min_focus_boxes,
+                                focus_probability=pm_crop_focus_probability,
                             ),
                             DualSquareResize(scales),
                         ]
                     ),
-                    p=0.7,
+                    p=regular_resize_probability,
                 ),
                 # ---------- 外观增强 ----------
                 DualWhiteLightJitter(

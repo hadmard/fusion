@@ -212,3 +212,6 @@ rf-detr*
 /AGENTS.md
 /auxiliary/
 /test/
+/custom/pm_error_analysis/
+/custom/archive/
+/custom/docs/

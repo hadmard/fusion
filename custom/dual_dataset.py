@@ -514,6 +514,12 @@ def build_dual_dataset(
     expanded_scales: bool = False,
     patch_size: int = 16,
     num_windows: int = 4,
+    pm_crop_branch_probability: float = 0.5,
+    pm_crop_min_scale: float = 0.30,
+    pm_crop_max_scale: float = 0.60,
+    pm_crop_min_kept_boxes: int = 1,
+    pm_crop_min_focus_boxes: int = 1,
+    pm_crop_focus_probability: float = 0.9,
 ) -> DualModalYoloDetection:
     """
     根据 RF-DETR 训练/验证阶段约定构建双模态数据集实例。
@@ -535,6 +541,9 @@ def build_dual_dataset(
             backbone patch 大小。
         num_windows:
             windowed attention 使用的窗口数。
+        pm_crop_branch_probability:
+            训练阶段进入 PM 局部裁剪分支的概率。这里直接暴露给训练入口，
+            是为了把“PM 放大”作为显式实验变量，而不是写死在增强内部。
 
     Returns:
         `DualModalYoloDetection` 实例。
@@ -549,6 +558,12 @@ def build_dual_dataset(
         expanded_scales=expanded_scales,
         patch_size=patch_size,
         num_windows=num_windows,
+        pm_crop_branch_probability=pm_crop_branch_probability,
+        pm_crop_min_scale=pm_crop_min_scale,
+        pm_crop_max_scale=pm_crop_max_scale,
+        pm_crop_min_kept_boxes=pm_crop_min_kept_boxes,
+        pm_crop_min_focus_boxes=pm_crop_min_focus_boxes,
+        pm_crop_focus_probability=pm_crop_focus_probability,
     )
 
     # 为了兼容 RF-DETR 现有调用习惯，这里把 `test` 映射到 `val`。
