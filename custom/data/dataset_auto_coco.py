@@ -21,7 +21,7 @@ from typing import Iterable, Optional
 import yaml
 from PIL import Image
 
-from custom.dataset_layout import is_probable_uv_image, list_image_files, resolve_split_layout
+from custom.data.dataset_layout import is_probable_uv_image, list_image_files, resolve_split_layout
 
 AUTO_COCO_DIRNAME = "_auto_coco"
 IMAGE_SUFFIXES = {".bmp", ".png", ".jpg", ".jpeg"}

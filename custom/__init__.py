@@ -8,11 +8,9 @@
 文件说明：定义模块，初始化init
 
 子模块职责：
-  - custom.cross_modal：跨模态融合模块。
-  - custom.dual_model：在 RF-DETR 主干上接入双模态前向流程与融合逻辑。
-  - custom.dual_dataset：实现成对 UV/White 数据集读取与 COCO 兼容评估接口。
-  - custom.dual_transforms：实现双模态同步增强，保证框始终以 UV 标注为准。
-  - custom.dual_collate：将 batch 组织成适合 RF-DETR 训练循环的结构。
+  - custom.core：模型核心结构，包括跨模态融合模块与双模态检测器。
+  - custom.data：数据管线，包括双模态数据集、同步增强、collate 与 COCO 自动适配。
+  - custom.runtime：运行兼容层，负责对接 src/rfdetr 的旧式 Model / args 接口。
   - custom.train：提供独立训练脚本入口。
 
 """
@@ -31,7 +29,7 @@ _SRC_ROOT = _PROJECT_ROOT / "src"
 def _prepend_sys_path(path: Path) -> None:
     """
     文件说明：把给定路径稳定地放到 `sys.path` 前部。
-    功能说明：将重复出现在 train/detect 入口脚本里的路径注入逻辑收敛到包级 helper，
+    功能说明：将重复出现在训练入口脚本里的路径注入逻辑收敛到包级 helper，
     这样后续若路径规则有变，只需要在一个地方维护。
     """
     path_str = str(path)
@@ -41,7 +39,7 @@ def _prepend_sys_path(path: Path) -> None:
 
 def prepare_project_environment(*, change_cwd: bool = False) -> Path:
     """
-    文件说明：为项目中的自定义训练、检测、评估脚本统一准备运行环境。
+    文件说明：为项目中的自定义训练脚本统一准备运行环境。
     功能说明：补齐项目根目录和 `src/` 路径，并在需要时切回项目根目录作为工作目录。
 
     这样做的原因：

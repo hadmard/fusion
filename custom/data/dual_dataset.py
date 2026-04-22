@@ -28,8 +28,8 @@ from PIL import Image
 from pycocotools.coco import COCO
 from torchvision.datasets import VisionDataset
 
-from custom.dataset_auto_coco import resolve_roboflow_coco_dataset_dir
-from custom.dataset_layout import (
+from custom.data.dataset_auto_coco import resolve_roboflow_coco_dataset_dir
+from custom.data.dataset_layout import (
     is_probable_uv_image,
     list_image_files,
     resolve_split_layout,
@@ -549,7 +549,7 @@ def build_dual_dataset(
         `DualModalYoloDetection` 实例。
     """
     # 延迟导入增强模块，避免在只做静态分析或导入本文件时引入不必要依赖。
-    from custom.dual_transforms import make_dual_transforms
+    from custom.data.dual_transforms import make_dual_transforms
 
     transforms = make_dual_transforms(
         image_set=image_set,

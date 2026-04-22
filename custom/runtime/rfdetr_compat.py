@@ -135,7 +135,7 @@ class Model:
         self.stop_early = False
 
         if self.args.dual_modal:
-            from custom.dual_model import build_dual_model
+            from custom.core.dual_model import build_dual_model
 
             self.model = build_dual_model(self.args)
         else:
@@ -214,8 +214,8 @@ class Model:
         optimizer = torch.optim.AdamW(param_dicts, lr=args.lr, weight_decay=args.weight_decay)
 
         if args.dual_modal:
-            from custom.dual_collate import dual_collate_fn
-            from custom.dual_dataset import build_dual_dataset
+            from custom.data.dual_collate import dual_collate_fn
+            from custom.data.dual_dataset import build_dual_dataset
 
             dataset_train = build_dual_dataset(
                 image_set="train",

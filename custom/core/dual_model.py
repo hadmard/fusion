@@ -20,7 +20,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from custom.cross_modal import MultiLevelCrossModalFusion
+from custom.core.cross_modal import MultiLevelCrossModalFusion
 from rfdetr.models.backbone import build_backbone
 from rfdetr.models.lwdetr import LWDETR
 from rfdetr.models.segmentation_head import SegmentationHead

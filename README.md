@@ -47,11 +47,17 @@ White 图像 ─→ DINOv2 Encoder ──→ White 特征 [B,C,H,W] ─┘
 
 ```
 custom/
-  cross_modal.py        # 跨模态融合模块（CrossModalFusionBlock / Stack）
-  dual_model.py         # 双模态模型封装（DualModalLWDETR）
-  dual_dataset.py       # 双模态数据集（UV + White 配对读取）
-  dual_transforms.py    # 双模态数据增强流水线
-  rfdetr_compat.py      # 自定义训练/验证兼容层（对接 src/rfdetr）
+  core/                 # 模型核心：跨模态融合与双模态检测器
+    cross_modal.py
+    dual_model.py
+  data/                 # 数据管线：数据集、同步增强、COCO 自动适配、collate
+    dataset_auto_coco.py
+    dataset_layout.py
+    dual_collate.py
+    dual_dataset.py
+    dual_transforms.py
+  runtime/              # 运行兼容层：对接 src/rfdetr 的旧式 Model / args 接口
+    rfdetr_compat.py
   notes/                # 版本记录、实验记录与思路档案
   train/
     run_train.py        # 双模态训练启动脚本
