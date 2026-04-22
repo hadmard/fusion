@@ -13,8 +13,6 @@
   - custom.dual_dataset：实现成对 UV/White 数据集读取与 COCO 兼容评估接口。
   - custom.dual_transforms：实现双模态同步增强，保证框始终以 UV 标注为准。
   - custom.dual_collate：将 batch 组织成适合 RF-DETR 训练循环的结构。
-  - custom.lazystrike：LazyStrike 辅助聚合与附加输出。
-  - custom.pm_loss：PM / 小目标 loss weighting 运行时补丁。
   - custom.train：提供独立训练脚本入口。
 
 """

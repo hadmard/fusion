@@ -51,14 +51,10 @@ custom/
   dual_model.py         # 双模态模型封装（DualModalLWDETR）
   dual_dataset.py       # 双模态数据集（UV + White 配对读取）
   dual_transforms.py    # 双模态数据增强流水线
-  lazystrike.py         # LazyStrike 辅助聚合分支
-  pm_loss.py            # PM / 小目标 loss weighting 补丁
   rfdetr_compat.py      # 自定义训练/验证兼容层（对接 src/rfdetr）
   notes/                # 版本记录、实验记录与思路档案
   train/
     run_train.py        # 双模态训练启动脚本
-  archive/              # 归档的历史兼容、专项工具与结果资料
-  docs/                 # 说明型文档
 
 datasets/
   images/               # UV 图像

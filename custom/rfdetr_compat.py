@@ -31,8 +31,6 @@ from rfdetr.models import PostProcess, build_model
 from rfdetr.models.lwdetr import build_criterion_and_postprocessors
 from rfdetr.util.get_param_dicts import get_param_dict
 from rfdetr.util.utils import BestMetricHolder, ModelEma, clean_state_dict
-from custom.lazystrike import apply_lazystrike_auxiliary_loss
-from custom.pm_loss import apply_pm_loss_weighting
 
 # ========== 第一部分：导入依赖与可 monkey patch 的数据集构建入口 ==========
 # UV-only 支持补丁会在运行时替换这个符号，因此这里保留模块级变量而不是写死局部导入。
@@ -208,8 +206,6 @@ class Model:
         torch.manual_seed(args.seed)
 
         criterion, postprocess = build_criterion_and_postprocessors(args)
-        apply_pm_loss_weighting(criterion, args)
-        apply_lazystrike_auxiliary_loss(criterion, args)
         model = self.model.to(device)
         model_without_ddp = model
 

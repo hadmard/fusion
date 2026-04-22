@@ -76,27 +76,13 @@ LR_MIN_FACTOR = 0.0
 RESUME_LOAD_LR_SCHEDULER = False
 SQUARE_RESIZE_DIV_64 = True
 
-# PM 定向优化
+# PM crop 定向增强
 PM_CROP_BRANCH_PROBABILITY = 0.5
 PM_CROP_MIN_SCALE = 0.30
 PM_CROP_MAX_SCALE = 0.60
 PM_CROP_MIN_KEPT_BOXES = 1
 PM_CROP_MIN_FOCUS_BOXES = 1
 PM_CROP_FOCUS_PROBABILITY = 0.9
-ENABLE_PM_LOSS_WEIGHTING = True
-PM_LOSS_CLASS_ID = 2
-PM_CLASS_LOSS_WEIGHT = 1.8
-SMALL_OBJECT_LOSS_WEIGHT = 1.4
-SMALL_OBJECT_AREA_THRESHOLD = 0.002
-
-# LazyStrike / LaSt-ViT 辅助聚合
-LAZYSTRIKE_ENABLED = True
-LAZYSTRIKE_APPLY_TO = "fused"
-LAZYSTRIKE_TOPK = 0
-LAZYSTRIKE_TOPK_RATIO = 0.25
-LAZYSTRIKE_SIGMA_SCALE = 1.0
-LAZYSTRIKE_SCORE_NUMERATOR = "original"
-LAZYSTRIKE_LOSS_COEF = 0.1
 
 # Runtime
 EVAL_MAX_DETS = 500
@@ -161,12 +147,6 @@ def run_training(
         projector_scale=PROJECTOR_SCALE,
         resolution=RESOLUTION,
         positional_encoding_size=POSITIONAL_ENCODING_SIZE,
-        lazystrike_enabled=LAZYSTRIKE_ENABLED,
-        lazystrike_apply_to=LAZYSTRIKE_APPLY_TO,
-        lazystrike_topk=LAZYSTRIKE_TOPK,
-        lazystrike_topk_ratio=LAZYSTRIKE_TOPK_RATIO,
-        lazystrike_sigma_scale=LAZYSTRIKE_SIGMA_SCALE,
-        lazystrike_score_numerator=LAZYSTRIKE_SCORE_NUMERATOR,
     )
     model_kwargs = model_cfg.model_dump()
     model_kwargs["dual_modal"] = dual_modal
@@ -219,12 +199,6 @@ def run_training(
         "pm_crop_min_kept_boxes": PM_CROP_MIN_KEPT_BOXES,
         "pm_crop_min_focus_boxes": PM_CROP_MIN_FOCUS_BOXES,
         "pm_crop_focus_probability": PM_CROP_FOCUS_PROBABILITY,
-        "enable_pm_loss_weighting": ENABLE_PM_LOSS_WEIGHTING,
-        "pm_loss_class_id": PM_LOSS_CLASS_ID,
-        "pm_class_loss_weight": PM_CLASS_LOSS_WEIGHT,
-        "small_object_loss_weight": SMALL_OBJECT_LOSS_WEIGHT,
-        "small_object_area_threshold": SMALL_OBJECT_AREA_THRESHOLD,
-        "lazystrike_loss_coef": LAZYSTRIKE_LOSS_COEF,
     }
 
     exclude_keys = {
@@ -257,20 +231,7 @@ def run_training(
     )
     print(
         f"{log_tag} pm_crop_probability={PM_CROP_BRANCH_PROBABILITY}, "
-        f"pm_crop_scale=({PM_CROP_MIN_SCALE}, {PM_CROP_MAX_SCALE}), "
-        f"pm_loss_weighting={ENABLE_PM_LOSS_WEIGHTING}, "
-        f"pm_class_weight={PM_CLASS_LOSS_WEIGHT}, "
-        f"small_object_weight={SMALL_OBJECT_LOSS_WEIGHT}, "
-        f"small_object_area_threshold={SMALL_OBJECT_AREA_THRESHOLD}"
-    )
-    print(
-        f"{log_tag} lazystrike_enabled={LAZYSTRIKE_ENABLED}, "
-        f"apply_to={LAZYSTRIKE_APPLY_TO}, "
-        f"topk={LAZYSTRIKE_TOPK or 'ratio'}, "
-        f"topk_ratio={LAZYSTRIKE_TOPK_RATIO}, "
-        f"sigma_scale={LAZYSTRIKE_SIGMA_SCALE}, "
-        f"score_numerator={LAZYSTRIKE_SCORE_NUMERATOR}, "
-        f"loss_coef={LAZYSTRIKE_LOSS_COEF}"
+        f"pm_crop_scale=({PM_CROP_MIN_SCALE}, {PM_CROP_MAX_SCALE})"
     )
 
     model.train(**train_kwargs)

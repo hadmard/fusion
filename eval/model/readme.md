@@ -1,5 +1,0 @@
-uvsingle就是单模态
-menkong就是最原始的cross-attn融合，加了一个门控
-kimi是去掉门控，但是做了六层深度聚合注意力的融合
-multifeature是在kimi基础上换成了四层融合，分别是vit输出的2，5，8，11
-high—resolution是提高了分辨率

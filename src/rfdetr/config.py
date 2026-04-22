@@ -100,12 +100,6 @@ class ModelConfig(BaseConfig):
     fusion_type: Literal["none", "uv_queries_white"] = "uv_queries_white"
     fusion_num_heads: int = 8
     fusion_num_layers: int = 4
-    lazystrike_enabled: bool = False
-    lazystrike_topk: int = 0
-    lazystrike_topk_ratio: float = 0.25
-    lazystrike_sigma_scale: float = 1.0
-    lazystrike_score_numerator: Literal["original", "filtered"] = "original"
-    lazystrike_apply_to: Literal["fused", "uv", "white"] = "fused"
     license: str = "Apache-2.0"
 
     @field_validator("pretrain_weights", mode="after")
@@ -393,7 +387,6 @@ class TrainConfig(BaseModel):
     fusion_type: Literal["none", "uv_queries_white"] = "uv_queries_white"
     fusion_num_heads: int = 8
     fusion_num_layers: int = 4
-    lazystrike_loss_coef: float = 0.0
     # PTL runtime/perf tuning knobs.
     train_log_sync_dist: bool = False
     train_log_on_step: bool = False
