@@ -226,12 +226,6 @@ class Model:
                 expanded_scales=args.expanded_scales,
                 patch_size=args.patch_size,
                 num_windows=args.num_windows,
-                pm_crop_branch_probability=getattr(args, "pm_crop_branch_probability", 0.5),
-                pm_crop_min_scale=getattr(args, "pm_crop_min_scale", 0.30),
-                pm_crop_max_scale=getattr(args, "pm_crop_max_scale", 0.60),
-                pm_crop_min_kept_boxes=getattr(args, "pm_crop_min_kept_boxes", 1),
-                pm_crop_min_focus_boxes=getattr(args, "pm_crop_min_focus_boxes", 1),
-                pm_crop_focus_probability=getattr(args, "pm_crop_focus_probability", 0.9),
             )
             dataset_val = build_dual_dataset(
                 image_set="val",

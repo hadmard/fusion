@@ -1,7 +1,7 @@
 """
 文件说明：本文件定义 UV/White 双模态训练与验证阶段的数据增强。
 功能：在保证 UV 主模态语义始终清晰的前提下，对 UV 与 White 图像执行同步几何增强、
-      模态特异性光学扰动、张量化与归一化，并同步维护检测框坐标。
+      固定的 dataset 侧尺寸对齐、张量化与归一化，并同步维护检测框坐标。
 
 ----------------------------------------------------------------------
 当前训练阶段增强配置（依执行顺序）：
@@ -10,20 +10,16 @@
     1. DualRandomHorizontalFlip         p=0.5
        UV 与 White 同步水平翻转，框坐标同步修正。
 
-    2. DualRandomSelect                 默认 p=0.5 走分支A，0.5 走分支B
-       分支A：DualSquareResize — 直接缩放到目标分辨率
-       分支B：DualPMFocusCrop（p=1.0，围绕 PM 标签裁剪，
-               scale 0.30~0.60，最少保留 1 框含 1 个 PM）
-              → DualSquareResize — 裁剪后再缩放到目标分辨率
+    2. DualRandomSelect                 p=0.5 走无裁剪分支，0.5 走裁剪分支
+       分支A：DualSquareResize — 固定缩放到 batch resize 的基准画布
+       分支B：DualRandomSizeCrop（384~600）→ DualSquareResize
 
-  外观增强：
-    3. DualWhiteLightJitter             p=0.35
-       仅作用于 White，亮度/对比度各 ±12%，饱和度 ±6%。
-    4. 当前阶段先关闭 UV 强荧光扰动、模糊与加噪。
-       这样做是因为 PM 极小，更容易被这些纹理级扰动破坏边界。
+  batch 级 resize：
+    3. 多尺度随机 resize 不在 dataset 单图阶段执行，而是在训练循环中
+       对整个 NestedTensor batch 使用同一个 scale 执行。
 
   最终后处理：
-    7. DualToTensor + DualNormalize
+    4. DualToTensor + DualNormalize
        转张量并以 ImageNet 均值/方差标准化；框转为归一化 cxcywh。
 
 
@@ -39,7 +35,7 @@
   - 所有 transform 的输入输出签名统一为：
         `(img_uv, img_white, target) -> (img_uv, img_white, target)`
   - 所有边界框变换都以 UV 图像为基准，因为标注来源于 UV。
-  - White 是辅助模态，因此允许做分支 dropout 等更贴近采集误差的扰动。
+  - 当前训练链路不启用模态特异性外观扰动，只保留同步 flip/crop。
 """
 
 # ========== 第一部分：导入依赖 ==========
@@ -343,8 +339,13 @@ class DualRandomSizeCrop:
         self.max_size = max_size
 
     def __call__(self, img_uv, img_white, target):
-        crop_w = random.randint(self.min_size, min(img_uv.width, self.max_size))
-        crop_h = random.randint(self.min_size, min(img_uv.height, self.max_size))
+        max_crop_w = min(img_uv.width, self.max_size)
+        max_crop_h = min(img_uv.height, self.max_size)
+        min_crop_w = min(self.min_size, max_crop_w)
+        min_crop_h = min(self.min_size, max_crop_h)
+
+        crop_w = random.randint(min_crop_w, max_crop_w)
+        crop_h = random.randint(min_crop_h, max_crop_h)
 
         # 使用 UV 图像来采样裁剪区域，保证框变换与标签基准一致。
         region = TT.RandomCrop.get_params(img_uv, [crop_h, crop_w])
@@ -626,12 +627,6 @@ def make_dual_transforms(
     expanded_scales: bool = False,
     patch_size: int = 16,
     num_windows: int = 4,
-    pm_crop_branch_probability: float = 0.5,
-    pm_crop_min_scale: float = 0.30,
-    pm_crop_max_scale: float = 0.60,
-    pm_crop_min_kept_boxes: int = 1,
-    pm_crop_min_focus_boxes: int = 1,
-    pm_crop_focus_probability: float = 0.9,
 ) -> DualCompose:
     """
     构建与当前阶段匹配的双模态增强。
@@ -647,6 +642,10 @@ def make_dual_transforms(
         ]
     )
 
+    # Dataset-side resize is fixed. Random scale jitter is handled later in
+    # train_one_epoch by resizing the whole NestedTensor batch with one scale.
+    batch_resize_base_size = resolution
+
     # 默认只使用单一输入分辨率。
     scales = [resolution]
 
@@ -655,52 +654,27 @@ def make_dual_transforms(
         scales = compute_multi_scale_scales(
             resolution, expanded_scales, patch_size, num_windows
         )
-        scales = [scale for scale in scales if scale >= resolution]
-        if not scales:
-            scales = [resolution]
-        print(f"[DualTransforms] multi-scale sizes: {scales}")
+        if scales:
+            batch_resize_base_size = scales[-1]
+        print(
+            "[DualTransforms] batch-level multi-scale sizes: "
+            f"{scales}; dataset base size: {batch_resize_base_size}"
+        )
 
     if image_set == "train":
-        regular_resize_probability = 1.0 - max(0.0, min(1.0, pm_crop_branch_probability))
         return DualCompose(
             [
-                # ---------- 几何增强 ----------
                 DualRandomHorizontalFlip(p=0.5),
                 DualRandomSelect(
-                    DualSquareResize(scales),
+                    DualSquareResize([batch_resize_base_size]),
                     DualCompose(
                         [
-                            DualPMFocusCrop(
-                                p=1.0,
-                                # PM 当前主要问题是小目标召回不足，所以这里不再做轻微裁剪，
-                                # 而是用更小 crop 把 PM 在 672 输入中实际放大。
-                                min_crop_scale=pm_crop_min_scale,
-                                max_crop_scale=pm_crop_max_scale,
-                                min_aspect=0.85,
-                                max_aspect=1.2,
-                                attempts=12,
-                                # 不再强制保留多个非 PM 框，避免局部放大分支因为密集标注约束过严而失效。
-                                min_kept_boxes=pm_crop_min_kept_boxes,
-                                focus_label=2,
-                                min_focus_boxes=pm_crop_min_focus_boxes,
-                                focus_probability=pm_crop_focus_probability,
-                            ),
-                            DualSquareResize(scales),
+                            DualRandomSizeCrop(min_size=384, max_size=600),
+                            DualSquareResize([batch_resize_base_size]),
                         ]
                     ),
-                    p=regular_resize_probability,
+                    p=0.5,
                 ),
-                # ---------- 外观增强 ----------
-                DualWhiteLightJitter(
-                    brightness=0.12,
-                    contrast=0.12,
-                    saturation=0.06,
-                    hue=0.0,
-                    p=0.35,
-                ),
-                # 先去掉最可能伤害 PM 小目标边界的异常纹理扰动，
-                # 保留更温和的白光照明抖动，先做一轮干净对照训练。
-                # ---------- 最终张量化 ----------
                 normalize,
             ]
         )

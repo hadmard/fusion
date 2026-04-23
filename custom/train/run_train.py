@@ -70,19 +70,12 @@ DROP_PATH = 0.1
 # Strategy
 USE_EMA = True
 MULTI_SCALE = True
+DO_RANDOM_RESIZE_VIA_PADDING = False
 LR_SCHEDULER = "cosine"
 WARMUP_EPOCHS = 3
 LR_MIN_FACTOR = 0.0
 RESUME_LOAD_LR_SCHEDULER = False
 SQUARE_RESIZE_DIV_64 = True
-
-# PM crop 定向增强
-PM_CROP_BRANCH_PROBABILITY = 0.5
-PM_CROP_MIN_SCALE = 0.30
-PM_CROP_MAX_SCALE = 0.60
-PM_CROP_MIN_KEPT_BOXES = 1
-PM_CROP_MIN_FOCUS_BOXES = 1
-PM_CROP_FOCUS_PROBABILITY = 0.9
 
 # Runtime
 EVAL_MAX_DETS = 500
@@ -178,6 +171,7 @@ def run_training(
         "drop_path": DROP_PATH,
         "use_ema": USE_EMA,
         "multi_scale": MULTI_SCALE,
+        "do_random_resize_via_padding": DO_RANDOM_RESIZE_VIA_PADDING,
         "lr_scheduler": LR_SCHEDULER,
         "warmup_epochs": WARMUP_EPOCHS,
         "lr_min_factor": LR_MIN_FACTOR,
@@ -193,12 +187,6 @@ def run_training(
         "mask_downsample_ratio": 4,
         "output_dir": output_dir,
         "square_resize_div_64": SQUARE_RESIZE_DIV_64,
-        "pm_crop_branch_probability": PM_CROP_BRANCH_PROBABILITY,
-        "pm_crop_min_scale": PM_CROP_MIN_SCALE,
-        "pm_crop_max_scale": PM_CROP_MAX_SCALE,
-        "pm_crop_min_kept_boxes": PM_CROP_MIN_KEPT_BOXES,
-        "pm_crop_min_focus_boxes": PM_CROP_MIN_FOCUS_BOXES,
-        "pm_crop_focus_probability": PM_CROP_FOCUS_PROBABILITY,
     }
 
     exclude_keys = {
@@ -224,16 +212,12 @@ def run_training(
         f"max_train_batches={MAX_TRAIN_BATCHES}, max_val_batches={MAX_VAL_BATCHES}, "
         f"lr={LR}, scheduler={LR_SCHEDULER}, workers={NUM_WORKERS}, "
         f"pin_memory={PIN_MEMORY}, persistent_workers={PERSISTENT_WORKERS}, "
+        f"multi_scale={MULTI_SCALE}, batch_resize={not DO_RANDOM_RESIZE_VIA_PADDING}, "
         f"resume={bool(resume_path)}, dual_modal={dual_modal}, "
         f"use_white={use_white}, fusion_type={fusion_type}, "
         f"projector_scale={PROJECTOR_SCALE}, "
         f"pretrain_weights={pretrain_weights or 'dinov2-only'}"
     )
-    print(
-        f"{log_tag} pm_crop_probability={PM_CROP_BRANCH_PROBABILITY}, "
-        f"pm_crop_scale=({PM_CROP_MIN_SCALE}, {PM_CROP_MAX_SCALE})"
-    )
-
     model.train(**train_kwargs)
     print(f"{log_tag} Done. Outputs saved to: {output_dir}")
     return output_dir
