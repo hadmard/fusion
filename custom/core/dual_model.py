@@ -59,7 +59,7 @@ class DualModalLWDETR(LWDETR):
         use_white: bool = True,
         fusion_type: str = "uv_queries_white",
         fusion_num_heads: int = 8,
-        fusion_num_layers: int = 4,
+        fusion_num_layers: int = 1,
     ):
         # 先初始化 RF-DETR 原始主干。
         # 这样可以最大限度复用已有检测头、transformer、two-stage 等逻辑。
@@ -94,17 +94,13 @@ class DualModalLWDETR(LWDETR):
         self.fusion_enabled = self.use_white and self.fusion_type == "uv_queries_white"
         self.projector_scales = tuple(backbone[0].projector_scale)
 
-        # 融合点前移到 projector 之前，因此这里直接按 encoder 输出层级创建
-        # “整组 UV / White” 的顺序跨模态融合模块。
-        # projector 会在融合后的 UV encoder features 之上继续构建多尺度检测特征。
+        # 融合点前移到 projector 之前。对 RF-DETR Base 默认 [2, 5, 8, 11]，
+        # 每一路 UV encoder feature 都会先读取对应 White feature，再交给 projector。
         encoder_feature_dims = list(backbone[0].encoder._out_feature_channels)
         self.fusion_module = (
             MultiLevelCrossModalFusion(
                 input_dims=encoder_feature_dims,
                 num_heads=fusion_num_heads,
-                # 当前 deformable 主路径里，4 路 White memory 数量由融合模块内部固定约束；
-                # 这里的 fusion_num_layers 只表示“每个 UV 分支内部读几轮 White memory”。
-                num_reads=fusion_num_layers,
             )
             if self.fusion_enabled
             else None
@@ -124,7 +120,7 @@ class DualModalLWDETR(LWDETR):
         white_features: List[NestedTensor],
     ) -> List[NestedTensor]:
         """
-        对整组 encoder features 执行一次顺序跨模态融合。
+        对每一路 encoder feature 执行同层 UV<-White 跨模态融合。
 
         输入输出都仍然保持 RF-DETR 原本使用的 List[NestedTensor] 结构，
         以便后续 transformer 逻辑无需任何改动。
@@ -431,6 +427,6 @@ def build_dual_model(args):
         use_white=getattr(args, "use_white", True),
         fusion_type=getattr(args, "fusion_type", "uv_queries_white"),
         fusion_num_heads=getattr(args, "fusion_num_heads", getattr(args, "ca_nheads", 8)),
-        fusion_num_layers=getattr(args, "fusion_num_layers", 4),
+        fusion_num_layers=getattr(args, "fusion_num_layers", 1),
     )
     return model

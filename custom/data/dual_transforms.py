@@ -10,16 +10,20 @@
     1. DualRandomHorizontalFlip         p=0.5
        UV 与 White 同步水平翻转，框坐标同步修正。
 
-    2. DualRandomSelect                 p=0.5 走无裁剪分支，0.5 走裁剪分支
-       分支A：DualSquareResize — 固定缩放到 batch resize 的基准画布
-       分支B：DualRandomSizeCrop（384~600）→ DualSquareResize
+    2. DualRandomSelect                 p=0.5 走 PML 裁剪分支，0.5 走普通随机裁剪分支
+       分支A：DualPMLGuidedCrop(label=1) — 围绕 PML 框外扩裁剪
+       分支B：DualRandomCrop（384~600）— 普通随机裁剪
+
+    3. DualResizePad
+       保持裁剪区域纵横比，仅在裁剪区域大于基准画布时等比缩小，
+       再同步 padding 到 batch resize 的基准画布。
 
   batch 级 resize：
-    3. 多尺度随机 resize 不在 dataset 单图阶段执行，而是在训练循环中
+    4. 多尺度随机 resize 不在 dataset 单图阶段执行，而是在训练循环中
        对整个 NestedTensor batch 使用同一个 scale 执行。
 
   最终后处理：
-    4. DualToTensor + DualNormalize
+    5. DualToTensor + DualNormalize
        转张量并以 ImageNet 均值/方差标准化；框转为归一化 cxcywh。
 
 
@@ -27,9 +31,8 @@
   第一部分：导入依赖
   第二部分：增强实现（可多个）
   第三部分：同步几何增强
-  第四部分：模态相关光学扰动
-  第五部分：张量化与归一化
-  第六部分：实现函数 `make_dual_transforms`
+  第四部分：张量化与归一化
+  第五部分：实现函数 `make_dual_transforms`
 
 核心约束：
   - 所有 transform 的输入输出签名统一为：
@@ -40,55 +43,17 @@
 
 # ========== 第一部分：导入依赖 ==========
 import random
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 
 import numpy as np
-import PIL
-import PIL.ImageFilter
 import torch
+import torch.nn.functional as torch_F
 import torchvision.transforms as TT
 import torchvision.transforms.functional as F
 
 from rfdetr.datasets.coco import compute_multi_scale_scales
 from rfdetr.util.box_ops import box_xyxy_to_cxcywh
 from rfdetr.util.misc import interpolate
-
-
-def _normalize_resize_size(
-    image_size: Tuple[int, int],
-    size,
-    max_size: Optional[int] = None,
-) -> Tuple[int, int]:
-    """
-    兼容旧版 DETR 风格的 resize 入口。
-
-    为什么把兼容逻辑留在 custom：
-    - 训练链路当前仍依赖旧版 dual transforms 的函数签名；
-    - `src/rfdetr` 已切换到新的 transforms 体系，不再暴露旧 helper；
-    - 把这层适配局部化，能避免把兼容代码反向塞回主库。
-    """
-    if isinstance(size, (list, tuple)):
-        if len(size) != 2:
-            raise ValueError(f"resize size 必须是长度为 2 的序列，当前得到: {size}")
-        return int(size[0]), int(size[1])
-
-    width, height = image_size
-    short_side = int(size)
-
-    if max_size is not None:
-        min_original = float(min(width, height))
-        max_original = float(max(width, height))
-        if max_original / max(min_original, 1.0) * short_side > max_size:
-            short_side = int(round(max_size * min_original / max(max_original, 1.0)))
-
-    if width <= height:
-        new_width = short_side
-        new_height = int(round(short_side * height / max(width, 1)))
-    else:
-        new_height = short_side
-        new_width = int(round(short_side * width / max(height, 1)))
-
-    return new_height, new_width
 
 
 def hflip(image, target):
@@ -167,40 +132,68 @@ def crop(image, target, region):
     return cropped_image, target
 
 
-def resize(image, target, size, max_size: Optional[int] = None):
-    """对 UV 图像做按比例 resize，并同步更新几何字段。"""
-    new_height, new_width = _normalize_resize_size(image.size, size, max_size)
-    resized_image = F.resize(image, (new_height, new_width))
+def resize_pad(image, target, size: int, fill: int = 0):
+    """
+    等比缩小过大的图像，再居中 padding 到正方形尺寸。
+
+    小于目标尺寸的 crop 不做放大，只 padding。这样 PML/PM 局部裁剪不会被
+    额外插值放大，但相对整图 resize 仍保留更多原始细节。
+    """
+    original_width, original_height = image.size
+    scale = min(
+        1.0,
+        float(size) / max(original_width, 1),
+        float(size) / max(original_height, 1),
+    )
+    new_width = max(1, int(round(original_width * scale)))
+    new_height = max(1, int(round(original_height * scale)))
+
+    if new_width != original_width or new_height != original_height:
+        image = F.resize(image, (new_height, new_width))
+
+    pad_left = (size - new_width) // 2
+    pad_top = (size - new_height) // 2
+    pad_right = size - new_width - pad_left
+    pad_bottom = size - new_height - pad_top
+    image = F.pad(image, [pad_left, pad_top, pad_right, pad_bottom], fill=fill)
 
     if target is None:
-        return resized_image, None
+        return image, None
 
     target = target.copy()
-    original_width, original_height = image.size
-    ratio_width = new_width / max(original_width, 1)
-    ratio_height = new_height / max(original_height, 1)
 
     if "boxes" in target:
-        scale = torch.as_tensor(
-            [ratio_width, ratio_height, ratio_width, ratio_height],
+        boxes = target["boxes"] * torch.as_tensor(
+            [scale, scale, scale, scale],
             dtype=target["boxes"].dtype,
             device=target["boxes"].device,
         )
-        target["boxes"] = target["boxes"] * scale
+        boxes = boxes + torch.as_tensor(
+            [pad_left, pad_top, pad_left, pad_top],
+            dtype=boxes.dtype,
+            device=boxes.device,
+        )
+        target["boxes"] = boxes
 
     if "area" in target:
-        target["area"] = target["area"] * (ratio_width * ratio_height)
-
-    target["size"] = torch.as_tensor([int(new_height), int(new_width)])
+        target["area"] = target["area"] * (scale * scale)
 
     if "masks" in target:
-        target["masks"] = interpolate(
-            target["masks"][:, None].float(),
-            (new_height, new_width),
-            mode="nearest",
-        )[:, 0] > 0.5
+        masks = target["masks"]
+        if new_width != original_width or new_height != original_height:
+            masks = interpolate(
+                masks[:, None].float(),
+                (new_height, new_width),
+                mode="nearest",
+            )[:, 0] > 0.5
+        target["masks"] = torch_F.pad(
+            masks,
+            (pad_left, pad_right, pad_top, pad_bottom),
+            value=False,
+        )
 
-    return resized_image, target
+    target["size"] = torch.as_tensor([int(size), int(size)])
+    return image, target
 
 
 # ========== 第二部分：增强实现（可多个） ==========
@@ -293,6 +286,25 @@ class DualSquareResize:
         return img_uv_resized, img_white_resized, target
 
 
+class DualResizePad:
+    """
+    将 UV 与 White 同步 padding 到正方形尺寸。
+
+    若输入图像任意边长超过目标尺寸，则先等比缩小到可放入画布；
+    若输入已经小于目标尺寸，则不放大，只居中 padding。
+    """
+
+    def __init__(self, sizes: List[int], fill: int = 0):
+        self.sizes = sizes
+        self.fill = fill
+
+    def __call__(self, img_uv, img_white, target):
+        size = random.choice(self.sizes)
+        img_uv, target = resize_pad(img_uv, target, size=size, fill=self.fill)
+        img_white, _ = resize_pad(img_white, None, size=size, fill=self.fill)
+        return img_uv, img_white, target
+
+
 class DualRandomSelect:
     """在两条增强分支之间随机选择一条执行。"""
 
@@ -307,31 +319,7 @@ class DualRandomSelect:
         return self.transforms2(img_uv, img_white, target)
 
 
-class DualRandomResize:
-    """
-    随机缩放到一个候选尺寸。
-
-    UV 侧使用项目已有的 `resize` 工具函数，这样 target 中的框与尺寸信息会自动同步更新；
-    White 侧则跟随 UV 的结果尺寸直接 resize。
-    """
-
-    def __init__(self, sizes: List[int], max_size: Optional[int] = None):
-        self.sizes = sizes
-        self.max_size = max_size
-
-    def __call__(self, img_uv, img_white, target):
-        size = random.choice(self.sizes)
-
-        # UV resize 后，target["size"] 会被更新为新的高宽。
-        img_uv, target = resize(img_uv, target, size, self.max_size)
-        height, width = target["size"].tolist()
-
-        # White 使用完全相同的尺寸，保证两路特征能够配对。
-        img_white = F.resize(img_white, (int(height), int(width)))
-        return img_uv, img_white, target
-
-
-class DualRandomSizeCrop:
+class DualRandomCrop:
     """对两路图像执行同步随机裁剪，并以 UV 框为准修正 target。"""
 
     def __init__(self, min_size: int, max_size: int):
@@ -354,233 +342,69 @@ class DualRandomSizeCrop:
         return img_uv, img_white, target
 
 
-class DualPMFocusCrop:
+class DualPMLGuidedCrop:
     """
-    面向 PM 小目标的安全裁剪。
+    围绕 PML 框做同步裁剪。
 
-    该任务里的 PM 框很小，如果直接沿用 COCO 风格的大幅随机裁剪，
-    很容易把病斑裁没，或者把叶片上下文裁得过碎。
-    这里优先做“大范围但有目标约束”的裁剪，并尽量围绕 PM 取样。
+    当前类别约定是 `["NPML", "PML", "PM"]`，因此默认 `label=1`。
+    裁剪区域以随机选中的一个 PML 框为中心，并按框宽高做少量外扩。
     """
 
     def __init__(
         self,
-        p: float = 0.3,
-        min_crop_scale: float = 0.65,
-        max_crop_scale: float = 0.95,
-        min_aspect: float = 0.85,
-        max_aspect: float = 1.2,
-        attempts: int = 12,
-        min_kept_boxes: int = 4,
-        focus_label: Optional[int] = 2,
-        min_focus_boxes: int = 1,
-        focus_probability: float = 0.8,
+        label: int = 1,
+        margin_ratio: Tuple[float, float] = (0.15, 0.35),
+        fallback_to_random_crop: bool = True,
+        random_crop_min_size: int = 384,
+        random_crop_max_size: int = 600,
     ):
-        self.p = p
-        self.min_crop_scale = min_crop_scale
-        self.max_crop_scale = max_crop_scale
-        self.min_aspect = min_aspect
-        self.max_aspect = max_aspect
-        self.attempts = attempts
-        self.min_kept_boxes = min_kept_boxes
-        self.focus_label = focus_label
-        self.min_focus_boxes = min_focus_boxes
-        self.focus_probability = focus_probability
+        self.label = label
+        self.margin_ratio = margin_ratio
+        self.fallback_to_random_crop = fallback_to_random_crop
+        self.fallback_crop = DualRandomCrop(
+            min_size=random_crop_min_size,
+            max_size=random_crop_max_size,
+        )
 
     def __call__(self, img_uv, img_white, target):
-        if random.random() >= self.p:
-            return img_uv, img_white, target
-
         if target is None or "boxes" not in target or target["boxes"].numel() == 0:
             return img_uv, img_white, target
 
-        img_w, img_h = img_uv.size
         labels = target.get("labels")
-        focus_boxes = None
-        if labels is not None and self.focus_label is not None:
-            focus_mask = labels == self.focus_label
-            if bool(focus_mask.any().item()):
-                focus_boxes = target["boxes"][focus_mask]
-
-        min_crop_w = max(1, int(img_w * self.min_crop_scale))
-        min_crop_h = max(1, int(img_h * self.min_crop_scale))
-        max_crop_w = max(min_crop_w, int(img_w * self.max_crop_scale))
-        max_crop_h = max(min_crop_h, int(img_h * self.max_crop_scale))
-
-        for _ in range(self.attempts):
-            crop_w = random.randint(min_crop_w, min(max_crop_w, img_w))
-            crop_h = random.randint(min_crop_h, min(max_crop_h, img_h))
-
-            aspect = crop_w / max(crop_h, 1)
-            if aspect < self.min_aspect or aspect > self.max_aspect:
-                continue
-
-            if focus_boxes is not None and random.random() < self.focus_probability:
-                focus_box = focus_boxes[random.randrange(len(focus_boxes))]
-                center_x = int(round(float((focus_box[0] + focus_box[2]) * 0.5)))
-                center_y = int(round(float((focus_box[1] + focus_box[3]) * 0.5)))
-
-                left_min = max(0, center_x - crop_w + 1)
-                left_max = min(center_x, img_w - crop_w)
-                top_min = max(0, center_y - crop_h + 1)
-                top_max = min(center_y, img_h - crop_h)
-
-                left = (
-                    random.randint(left_min, left_max)
-                    if left_min <= left_max
-                    else random.randint(0, img_w - crop_w)
-                )
-                top = (
-                    random.randint(top_min, top_max)
-                    if top_min <= top_max
-                    else random.randint(0, img_h - crop_h)
-                )
-            else:
-                left = random.randint(0, img_w - crop_w)
-                top = random.randint(0, img_h - crop_h)
-
-            region = (top, left, crop_h, crop_w)
-            img_uv_cropped, target_cropped = crop(img_uv, target, region)
-
-            if int(target_cropped["boxes"].shape[0]) < self.min_kept_boxes:
-                continue
-
-            if focus_boxes is not None:
-                kept_focus = int((target_cropped["labels"] == self.focus_label).sum().item())
-                if kept_focus < self.min_focus_boxes:
-                    continue
-
-            img_white_cropped = F.crop(img_white, *region)
-            return img_uv_cropped, img_white_cropped, target_cropped
-
-        return img_uv, img_white, target
-
-
-# ========== 第四部分：模态相关光学扰动 ==========
-class DualWhiteLightJitter:
-    """
-    仅对白光分支做温和照明扰动。
-
-    白光图承担叶片轮廓、叶脉和整体组织状态信息，
-    所以只模拟亮度/对比度/轻微饱和度变化，避免大幅颜色偏移。
-    """
-
-    def __init__(
-        self,
-        brightness: float = 0.12,
-        contrast: float = 0.12,
-        saturation: float = 0.06,
-        hue: float = 0.0,
-        p: float = 0.35,
-    ):
-        self.p = p
-        self.brightness = brightness
-        self.contrast = contrast
-        self.saturation = saturation
-        self.hue = hue
-
-    def __call__(self, img_uv, img_white, target):
-        if random.random() < self.p:
-            img_white = TT.ColorJitter(
-                brightness=self.brightness,
-                contrast=self.contrast,
-                saturation=self.saturation,
-                hue=self.hue,
-            )(img_white)
-        return img_uv, img_white, target
-
-
-class DualUVFluorescenceJitter:
-    """
-    仅作用在 UV 图像上的荧光强度扰动。
-
-    目的是模拟不同拍摄条件下的荧光亮度、响应强度和蓝通道变化。
-    """
-
-    def __init__(
-        self,
-        p: float = 0.4,
-        intensity_gain: Tuple[float, float] = (0.92, 1.12),
-        gamma_range: Tuple[float, float] = (0.9, 1.12),
-        blue_gain: Tuple[float, float] = (0.95, 1.18),
-    ):
-        self.p = p
-        self.intensity_gain = intensity_gain
-        self.gamma_range = gamma_range
-        self.blue_gain = blue_gain
-
-    def __call__(self, img_uv, img_white, target):
-        if random.random() >= self.p:
+        if labels is None:
             return img_uv, img_white, target
 
-        # 转为 [0, 1] 浮点数组，便于做连续强度扰动。
-        uv_arr = np.asarray(img_uv).astype(np.float32) / 255.0
+        pml_mask = labels == self.label
+        if not bool(pml_mask.any().item()):
+            if self.fallback_to_random_crop:
+                return self.fallback_crop(img_uv, img_white, target)
+            return img_uv, img_white, target
 
-        gain = random.uniform(*self.intensity_gain)
-        gamma = random.uniform(*self.gamma_range)
-        blue_gain = random.uniform(*self.blue_gain)
+        pml_boxes = target["boxes"][pml_mask]
+        pml_box = pml_boxes[random.randrange(len(pml_boxes))]
+        x1, y1, x2, y2 = [float(value) for value in pml_box.tolist()]
+        box_w = max(x2 - x1, 1.0)
+        box_h = max(y2 - y1, 1.0)
+        margin = random.uniform(*self.margin_ratio)
+        margin_x = box_w * margin
+        margin_y = box_h * margin
 
-        # 先做整体增益，再做 gamma，再额外拉伸蓝通道。
-        uv_arr = np.clip(uv_arr * gain, 0.0, 1.0)
-        uv_arr = np.clip(np.power(uv_arr, gamma), 0.0, 1.0)
-        uv_arr[..., 2] = np.clip(uv_arr[..., 2] * blue_gain, 0.0, 1.0)
+        img_w, img_h = img_uv.size
+        left = max(0, int(np.floor(x1 - margin_x)))
+        top = max(0, int(np.floor(y1 - margin_y)))
+        right = min(img_w, int(np.ceil(x2 + margin_x)))
+        bottom = min(img_h, int(np.ceil(y2 + margin_y)))
 
-        img_uv = PIL.Image.fromarray((uv_arr * 255.0).astype(np.uint8))
+        crop_w = max(1, right - left)
+        crop_h = max(1, bottom - top)
+        region = (top, left, crop_h, crop_w)
+
+        img_uv, target = crop(img_uv, target, region)
+        img_white = F.crop(img_white, *region)
         return img_uv, img_white, target
 
 
-class DualGaussianBlur:
-    """分别对两路图像以独立概率施加高斯模糊。"""
-
-    def __init__(self, kernel_sizes: List[int] = [3], p: float = 0.08):
-        self.kernel_sizes = kernel_sizes
-        self.p = p
-
-    def __call__(self, img_uv, img_white, target):
-        if random.random() < self.p:
-            img_white = img_white.filter(
-                PIL.ImageFilter.GaussianBlur(radius=random.choice(self.kernel_sizes) // 2)
-            )
-
-        if random.random() < self.p:
-            img_uv = img_uv.filter(
-                PIL.ImageFilter.GaussianBlur(radius=random.choice(self.kernel_sizes) // 2)
-            )
-
-        return img_uv, img_white, target
-
-
-class DualGaussianNoise:
-    """分别为 UV 与 White 添加高斯噪声，以模拟成像噪声。"""
-
-    def __init__(self, std_range: Tuple[float, float] = (0.003, 0.012), p: float = 0.2):
-        self.std_range = std_range
-        self.p = p
-
-    def __call__(self, img_uv, img_white, target):
-        # White 与 UV 分支分别独立决定是否加噪。
-        if random.random() < self.p:
-            img_white = self._add_noise(img_white, random.uniform(*self.std_range))
-
-        # UV 的噪声范围允许稍微更强一些，用于模拟 UV 成像波动。
-        if random.random() < min(self.p * 1.2, 1.0):
-            img_uv = self._add_noise(
-                img_uv,
-                random.uniform(self.std_range[0], self.std_range[1] * 1.5),
-            )
-
-        return img_uv, img_white, target
-
-    @staticmethod
-    def _add_noise(img: PIL.Image.Image, std: float) -> PIL.Image.Image:
-        """给单张 PIL 图像叠加高斯噪声。"""
-        arr = np.asarray(img).astype(np.float32) / 255.0
-        noise = np.random.randn(*arr.shape).astype(np.float32) * std
-        arr = np.clip(arr + noise, 0.0, 1.0)
-        return PIL.Image.fromarray((arr * 255.0).astype(np.uint8))
-
-
-# ========== 第五部分：张量化与归一化 ==========
+# ========== 第四部分：张量化与归一化 ==========
 class DualToTensor:
     """将两路 PIL 图像同时转为张量。"""
 
@@ -619,7 +443,7 @@ class DualNormalize:
         return img_uv, img_white, target
 
 
-# ========== 第六部分：实现函数 ==========
+# ========== 第五部分：实现函数 ==========
 def make_dual_transforms(
     image_set: str,
     resolution: int,
@@ -662,19 +486,29 @@ def make_dual_transforms(
         )
 
     if image_set == "train":
+        crop_max_size = min(600, batch_resize_base_size)
+        crop_min_size = min(384, crop_max_size)
         return DualCompose(
             [
                 DualRandomHorizontalFlip(p=0.5),
                 DualRandomSelect(
-                    DualSquareResize([batch_resize_base_size]),
+                    DualPMLGuidedCrop(
+                        label=1,
+                        margin_ratio=(0.15, 0.35),
+                        random_crop_min_size=crop_min_size,
+                        random_crop_max_size=crop_max_size,
+                    ),
                     DualCompose(
                         [
-                            DualRandomSizeCrop(min_size=384, max_size=600),
-                            DualSquareResize([batch_resize_base_size]),
+                            DualRandomCrop(
+                                min_size=crop_min_size,
+                                max_size=crop_max_size,
+                            ),
                         ]
                     ),
                     p=0.5,
                 ),
+                DualResizePad([batch_resize_base_size]),
                 normalize,
             ]
         )

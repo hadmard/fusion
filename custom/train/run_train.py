@@ -43,7 +43,7 @@ NUM_CLASSES = 3
 PRETRAIN_WEIGHTS = "rf-detr-base.pth"
 USE_WHITE = True
 FUSION_TYPE = "uv_queries_white"
-FUSION_NUM_LAYERS = 4
+FUSION_NUM_LAYERS = 1
 PROJECTOR_SCALE = ["P3", "P4"]
 RESOLUTION = 672
 POSITIONAL_ENCODING_SIZE = 37
@@ -215,6 +215,7 @@ def run_training(
         f"multi_scale={MULTI_SCALE}, batch_resize={not DO_RANDOM_RESIZE_VIA_PADDING}, "
         f"resume={bool(resume_path)}, dual_modal={dual_modal}, "
         f"use_white={use_white}, fusion_type={fusion_type}, "
+        f"fusion_num_layers={FUSION_NUM_LAYERS}, "
         f"projector_scale={PROJECTOR_SCALE}, "
         f"pretrain_weights={pretrain_weights or 'dinov2-only'}"
     )

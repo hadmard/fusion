@@ -1,0 +1,48 @@
+import torch
+
+import custom.core.cross_modal as cross_modal
+from custom.core.cross_modal import MultiLevelCrossModalFusion
+
+
+def _make_feature_group(batch_size: int = 1, channels: int = 8) -> list[torch.Tensor]:
+    return [torch.randn(batch_size, channels, 2, 2) for _ in range(4)]
+
+
+def test_same_depth_fusion_removes_depth_attention_residual() -> None:
+    assert not hasattr(cross_modal, "DepthAttentionResidual")
+    assert not hasattr(cross_modal, "WhiteTextureAdapter")
+
+    fusion = MultiLevelCrossModalFusion(
+        input_dims=[8, 8, 8, 8],
+        fusion_dim=16,
+        num_heads=4,
+    )
+
+    assert "DepthAttentionResidual" not in {
+        module.__class__.__name__ for module in fusion.modules()
+    }
+    assert "WhiteTextureAdapter" not in {
+        module.__class__.__name__ for module in fusion.modules()
+    }
+    assert not hasattr(fusion, "requested_num_reads")
+    assert not hasattr(fusion, "num_reads")
+
+
+def test_same_depth_fusion_updates_all_encoder_features_before_projector() -> None:
+    torch.manual_seed(0)
+    fusion = MultiLevelCrossModalFusion(
+        input_dims=[8, 8, 8, 8],
+        fusion_dim=16,
+        num_heads=4,
+    )
+    uv_features = _make_feature_group()
+    white_features = _make_feature_group()
+
+    with torch.no_grad():
+        fused_features = fusion(uv_features, white_features)
+
+    assert len(fused_features) == 4
+    for index, fused_feature in enumerate(fused_features):
+        assert fused_feature is not uv_features[index]
+        assert fused_feature.shape == uv_features[index].shape
+        assert not torch.equal(fused_feature, uv_features[index])
