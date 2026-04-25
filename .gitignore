@@ -198,6 +198,10 @@ rf-detr*
 # test
 /test_visualizations/
 /debugging/
+/summary.pdf
+/test_label/
+/test_uv/
+/test_white/
 
 # VS Code
 /.vscode/
