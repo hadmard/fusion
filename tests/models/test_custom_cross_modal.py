@@ -1,7 +1,7 @@
 import torch
 
 import custom.core.cross_modal as cross_modal
-from custom.core.cross_modal import MultiLevelCrossModalFusion
+from custom.core.cross_modal import MultiLevelCrossModalFusion, SingleLevelCrossModalFusion
 
 
 def _make_feature_group(batch_size: int = 1, channels: int = 8) -> list[torch.Tensor]:
@@ -46,3 +46,39 @@ def test_same_depth_fusion_updates_all_encoder_features_before_projector() -> No
         assert fused_feature is not uv_features[index]
         assert fused_feature.shape == uv_features[index].shape
         assert not torch.equal(fused_feature, uv_features[index])
+
+
+def test_multi_level_fusion_keeps_one_read_per_depth() -> None:
+    fusion = MultiLevelCrossModalFusion(
+        input_dims=[8, 8, 8, 8],
+        fusion_dim=16,
+        num_heads=4,
+    )
+
+    fusion_blocks = [
+        module
+        for module in fusion.modules()
+        if isinstance(module, SingleLevelCrossModalFusion)
+    ]
+
+    assert len(fusion.level_fusions) == 4
+    assert all(
+        isinstance(fusion_level, SingleLevelCrossModalFusion)
+        for fusion_level in fusion.level_fusions
+    )
+    assert len(fusion_blocks) == 4
+    assert not hasattr(fusion, "num_layers")
+
+
+def test_multi_level_fusion_rejects_stack_depth_argument() -> None:
+    try:
+        MultiLevelCrossModalFusion(
+            input_dims=[8, 8, 8, 8],
+            fusion_dim=16,
+            num_heads=4,
+            num_layers=2,
+        )
+    except TypeError:
+        return
+
+    raise AssertionError("MultiLevelCrossModalFusion should not accept num_layers.")

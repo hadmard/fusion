@@ -74,7 +74,6 @@ def build_namespace(model_config: ModelConfig, train_config: TrainConfig) -> Any
         use_white=mc.use_white,
         fusion_type=mc.fusion_type,
         fusion_num_heads=mc.fusion_num_heads,
-        fusion_num_layers=mc.fusion_num_layers,
         # num_queries / num_select live on subclass configs.
         num_queries=getattr(mc, "num_queries", 300),
         num_select=getattr(mc, "num_select", tc.num_select),

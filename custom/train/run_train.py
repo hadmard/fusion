@@ -43,7 +43,6 @@ NUM_CLASSES = 3
 PRETRAIN_WEIGHTS = "rf-detr-base.pth"
 USE_WHITE = True
 FUSION_TYPE = "uv_queries_white"
-FUSION_NUM_LAYERS = 1
 PROJECTOR_SCALE = ["P3", "P4"]
 RESOLUTION = 672
 POSITIONAL_ENCODING_SIZE = 37
@@ -70,6 +69,7 @@ DROP_PATH = 0.1
 # Strategy
 USE_EMA = True
 MULTI_SCALE = True
+EXPANDED_SCALES = True
 DO_RANDOM_RESIZE_VIA_PADDING = False
 LR_SCHEDULER = "cosine"
 WARMUP_EPOCHS = 3
@@ -136,7 +136,6 @@ def run_training(
         pretrain_weights=pretrain_weights,
         use_white=use_white,
         fusion_type=fusion_type,
-        fusion_num_layers=FUSION_NUM_LAYERS,
         projector_scale=PROJECTOR_SCALE,
         resolution=RESOLUTION,
         positional_encoding_size=POSITIONAL_ENCODING_SIZE,
@@ -156,7 +155,6 @@ def run_training(
         "dual_modal": dual_modal,
         "use_white": use_white,
         "fusion_type": fusion_type,
-        "fusion_num_layers": FUSION_NUM_LAYERS,
         "epochs": EPOCHS,
         "batch_size": BATCH_SIZE,
         "grad_accum_steps": GRAD_ACCUM_STEPS,
@@ -171,6 +169,7 @@ def run_training(
         "drop_path": DROP_PATH,
         "use_ema": USE_EMA,
         "multi_scale": MULTI_SCALE,
+        "expanded_scales": EXPANDED_SCALES,
         "do_random_resize_via_padding": DO_RANDOM_RESIZE_VIA_PADDING,
         "lr_scheduler": LR_SCHEDULER,
         "warmup_epochs": WARMUP_EPOCHS,
@@ -212,10 +211,10 @@ def run_training(
         f"max_train_batches={MAX_TRAIN_BATCHES}, max_val_batches={MAX_VAL_BATCHES}, "
         f"lr={LR}, scheduler={LR_SCHEDULER}, workers={NUM_WORKERS}, "
         f"pin_memory={PIN_MEMORY}, persistent_workers={PERSISTENT_WORKERS}, "
-        f"multi_scale={MULTI_SCALE}, batch_resize={not DO_RANDOM_RESIZE_VIA_PADDING}, "
+        f"multi_scale={MULTI_SCALE}, expanded_scales={EXPANDED_SCALES}, "
+        f"batch_resize={not DO_RANDOM_RESIZE_VIA_PADDING}, "
         f"resume={bool(resume_path)}, dual_modal={dual_modal}, "
         f"use_white={use_white}, fusion_type={fusion_type}, "
-        f"fusion_num_layers={FUSION_NUM_LAYERS}, "
         f"projector_scale={PROJECTOR_SCALE}, "
         f"pretrain_weights={pretrain_weights or 'dinov2-only'}"
     )

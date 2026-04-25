@@ -59,7 +59,6 @@ class DualModalLWDETR(LWDETR):
         use_white: bool = True,
         fusion_type: str = "uv_queries_white",
         fusion_num_heads: int = 8,
-        fusion_num_layers: int = 1,
     ):
         # 先初始化 RF-DETR 原始主干。
         # 这样可以最大限度复用已有检测头、transformer、two-stage 等逻辑。
@@ -427,6 +426,5 @@ def build_dual_model(args):
         use_white=getattr(args, "use_white", True),
         fusion_type=getattr(args, "fusion_type", "uv_queries_white"),
         fusion_num_heads=getattr(args, "fusion_num_heads", getattr(args, "ca_nheads", 8)),
-        fusion_num_layers=getattr(args, "fusion_num_layers", 1),
     )
     return model
