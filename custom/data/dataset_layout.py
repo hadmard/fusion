@@ -11,12 +11,19 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
+import re
 
 
 # ========== 第一部分：常量、数据结构与基础工具 ==========
 IMAGE_SUFFIXES = {".bmp", ".png", ".jpg", ".jpeg", ".tif", ".tiff"}
+PAIR_STEM_RE = re.compile(
+    r"^image_(\d{8}_\d{6})_(uv|white)_(\d+)(?:_aug(\d+))?$",
+    re.IGNORECASE,
+)
+_WHITE_INDEX_CACHE: dict[Path, dict[tuple[int, int | None], list[tuple[datetime, Path]]]] = {}
 
 
 @dataclass(frozen=True)
@@ -50,6 +57,41 @@ def list_image_files(directory: Path) -> list[Path]:
     return sorted(path for path in directory.iterdir() if is_image_file(path))
 
 
+def _parse_pair_stem(stem: str) -> tuple[datetime, str, int, int | None] | None:
+    match = PAIR_STEM_RE.match(stem)
+    if not match:
+        return None
+
+    ts_raw, modality, leaf_raw, aug_raw = match.groups()
+    ts = datetime.strptime(ts_raw, "%Y%m%d_%H%M%S")
+    return ts, modality.lower(), int(leaf_raw), int(aug_raw) if aug_raw is not None else None
+
+
+def _build_white_index(white_dir: Path) -> dict[tuple[int, int | None], list[tuple[datetime, Path]]]:
+    cached = _WHITE_INDEX_CACHE.get(white_dir)
+    if cached is not None:
+        return cached
+
+    index: dict[tuple[int, int | None], list[tuple[datetime, Path]]] = {}
+    for white_path in list_image_files(white_dir):
+        parsed = _parse_pair_stem(white_path.stem)
+        if parsed is None:
+            continue
+
+        ts, modality, leaf_idx, aug_idx = parsed
+        if modality != "white":
+            continue
+
+        key = (leaf_idx, aug_idx)
+        index.setdefault(key, []).append((ts, white_path))
+
+    for key in index:
+        index[key].sort(key=lambda item: item[0])
+
+    _WHITE_INDEX_CACHE[white_dir] = index
+    return index
+
+
 # ========== 第二部分：split 级目录解析 ==========
 def resolve_split_layout(
     dataset_dir: str | Path,
@@ -66,6 +108,8 @@ def resolve_split_layout(
        `images/<split>` + `images_white/<split>` + `labels/<split>`
     2. 服务器图片布局：
        `<split>` + `<split>_m`，标签优先在 `<split>` 同目录，次选 `<split>_1`
+     3. 模态分层布局：
+         `uv/images/<split>` + `white/images/<split>` + `uv/labels/<split>`
     """
     root = Path(dataset_dir).resolve()
 
@@ -83,6 +127,22 @@ def resolve_split_layout(
                 white_dir=standard_white if standard_white.exists() else None,
                 label_dir=standard_label if standard_label.exists() else None,
                 layout_name="standard_paired",
+            )
+
+    modality_uv = root / "uv" / "images" / split
+    modality_white = root / "white" / "images" / split
+    modality_label = root / "uv" / "labels" / split
+    if has_image_files(modality_uv):
+        if (not require_white or has_image_files(modality_white)) and (
+            not require_labels or modality_label.exists()
+        ):
+            return SplitLayout(
+                dataset_root=root,
+                split=split,
+                uv_dir=modality_uv,
+                white_dir=modality_white if modality_white.exists() else None,
+                label_dir=modality_label if modality_label.exists() else None,
+                layout_name="modality_subdirs",
             )
 
     flat_uv_candidates = [root / split, root / f"{split}_1"]
@@ -157,5 +217,28 @@ def resolve_white_path_for_uv(uv_path: Path, white_dir: Path | None) -> Path | N
         candidate_path = white_dir / f"{candidate_stem}{suffix}"
         if candidate_path.exists():
             return candidate_path
+
+    # Fallback for datasets where UV/White timestamps are not identical.
+    parsed_uv = _parse_pair_stem(uv_path.stem)
+    if parsed_uv is None:
+        return None
+
+    uv_ts, _modality, leaf_idx, aug_idx = parsed_uv
+    white_index = _build_white_index(white_dir)
+
+    candidates = white_index.get((leaf_idx, aug_idx), [])
+    if not candidates:
+        for (leaf_key, _aug_key), values in white_index.items():
+            if leaf_key == leaf_idx:
+                candidates.extend(values)
+
+    if not candidates:
+        return None
+
+    _best_ts, best_path = min(
+        candidates,
+        key=lambda item: abs((item[0] - uv_ts).total_seconds()),
+    )
+    return best_path
 
     return None

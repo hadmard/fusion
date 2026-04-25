@@ -21,6 +21,8 @@ import torch
 # ========== 第一部分：导入期环境兼容 ==========
 if os.environ.get("PYTORCH_ENABLE_MPS_FALLBACK") is None:
     os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+if os.environ.get("NO_ALBUMENTATIONS_UPDATE") is None:
+    os.environ["NO_ALBUMENTATIONS_UPDATE"] = "1"
 
 
 def _ensure_torchvision_nms_schema() -> None:

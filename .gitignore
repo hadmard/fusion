@@ -211,9 +211,9 @@ rf-detr*
 
 /AGENTS.md
 /auxiliary/
-/2motaiMiX/
-/2motaiMIX/
+/datasets/
 /test/
 /custom/pm_error_analysis/
 /custom/archive/
 /custom/docs/
+/datasets_old/

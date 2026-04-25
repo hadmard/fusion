@@ -25,6 +25,9 @@ from pathlib import Path
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _SRC_ROOT = _PROJECT_ROOT / "src"
 
+if os.environ.get("NO_ALBUMENTATIONS_UPDATE") is None:
+    os.environ["NO_ALBUMENTATIONS_UPDATE"] = "1"
+
 
 def _prepend_sys_path(path: Path) -> None:
     """
