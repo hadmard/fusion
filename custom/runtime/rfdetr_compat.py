@@ -112,6 +112,7 @@ def populate_args(**kwargs: Any) -> SimpleNamespace:
         "distributed": False,
         "gpu": 0,
         "rank": 0,
+        "force_no_pretrain": False,
         "shape": (model_config.resolution, model_config.resolution),
     }
     for key, default_value in extra_defaults.items():
