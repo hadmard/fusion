@@ -103,8 +103,17 @@ pip install -e .
 
 ### 双模态训练（UV + White）
 
+训练入口默认按 `NUM_GPUS=2` 走双卡 DDP。可以直接启动，脚本会在检测到 2 张可见 GPU 时自动重启为
+`torchrun`：
+
 ```bash
 python -m custom.train.run_train
+```
+
+也可以显式使用 `torchrun`：
+
+```bash
+torchrun --nproc_per_node=2 -m custom.train.run_train
 ```
 
 主要超参数在脚本顶部的**实验参数区**修改：
@@ -135,4 +144,3 @@ python -m custom.train.run_train
 | 7 | Normalize | ImageNet 均值/方差标准化 |
 
 ---
-

@@ -188,6 +188,8 @@ rf-detr*
 /output/
 
 # datasets
+/data/
+/datasets
 /datasets/
 /detect_datasets/
 

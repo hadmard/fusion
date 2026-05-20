@@ -267,7 +267,7 @@ def train_one_epoch(
         lr_scheduler.step()
         optimizer.zero_grad()
         if ema_m is not None:
-            ema_m.update(model)
+            ema_m.update(model.module if hasattr(model, "module") else model)
 
         metric_logger.update(loss=loss_value, **loss_dict_reduced_scaled, **loss_dict_reduced_unscaled)
         metric_logger.update(class_error=loss_dict_reduced["class_error"])

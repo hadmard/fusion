@@ -18,10 +18,15 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
+import time
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
+
+# Keep this before any torch import in this launcher or torchrun children.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT) not in sys.path:
@@ -48,14 +53,15 @@ FUSION_TYPE = "uv_queries_white"
 PROJECTOR_SCALE = ["P3", "P4"]
 RESOLUTION = 672
 POSITIONAL_ENCODING_SIZE = 37
+GRADIENT_CHECKPOINTING = True
 
 # Resume
 RESUME = ""
 
 # Training
-EPOCHS = 200
-BATCH_SIZE = 6
-GRAD_ACCUM_STEPS = 2
+EPOCHS = 160
+BATCH_SIZE = 4
+GRAD_ACCUM_STEPS = 3
 MAX_TRAIN_BATCHES = 0
 MAX_VAL_BATCHES = 0
 MAX_TEST_BATCHES = 0
@@ -82,8 +88,9 @@ SQUARE_RESIZE_DIV_64 = True
 # Runtime
 EVAL_MAX_DETS = 500
 RUN_TEST = True
+NUM_GPUS = 2
 # Windows 下 dataloader 多进程更容易触发 spawn 问题，默认更保守。
-NUM_WORKERS = 12
+NUM_WORKERS = 16
 DEVICE = "cuda"
 PIN_MEMORY = True
 PERSISTENT_WORKERS = True
@@ -94,6 +101,113 @@ OUTPUT_BASE_DIR = "output/train"
 
 
 # ========== 第三部分：训练主流程 ==========
+def _get_distributed_world_size() -> int:
+    """返回 torchrun 注入的 world size；未分布式启动时为 1。"""
+    return int(os.environ.get("WORLD_SIZE", "1"))
+
+
+def _get_target_num_gpus() -> int:
+    """训练入口期望使用的 GPU 数量。"""
+    return int(NUM_GPUS)
+
+
+def _is_torchrun_process() -> bool:
+    """判断当前进程是否已经由 torchrun/elastic 启动。"""
+    return "LOCAL_RANK" in os.environ and "WORLD_SIZE" in os.environ
+
+
+def _detect_visible_cuda_devices() -> int:
+    """按 PyTorch 视角检测当前环境可见 GPU 数，检测失败时返回 0。"""
+    try:
+        import torch
+    except ImportError:
+        return 0
+
+    if not torch.cuda.is_available():
+        return 0
+    return int(torch.cuda.device_count())
+
+
+def _maybe_relaunch_with_torchrun(log_tag: str) -> None:
+    """
+    支持直接 `python -m custom.train.run_train` 启动多卡训练。
+
+    已在 torchrun 子进程中时只校验 world size；未在 torchrun 中且目标 GPU 数
+    大于 1 时，自动重启成等价的 torchrun 命令。这让自定义入口的用法更接近
+    原生 RF-DETR 环境：用户只需要保证 CUDA 环境可见，不必手动设置 RANK 等变量。
+    """
+    target_num_gpus = _get_target_num_gpus()
+    if target_num_gpus <= 1:
+        return
+
+    if _is_torchrun_process():
+        world_size = _get_distributed_world_size()
+        if world_size != target_num_gpus:
+            raise RuntimeError(
+                f"当前训练配置 NUM_GPUS={target_num_gpus}，但 torchrun WORLD_SIZE={world_size}。"
+                f"请使用：torchrun --nproc_per_node={target_num_gpus} -m custom.train.run_train"
+            )
+        return
+
+    command = [
+        sys.executable,
+        "-m",
+        "torch.distributed.run",
+        f"--nproc_per_node={target_num_gpus}",
+        "--standalone",
+        "-m",
+        "custom.train.run_train",
+    ]
+    print(f"{log_tag} Relaunch with torchrun: {' '.join(command)}", flush=True)
+    completed = subprocess.run(command, cwd=str(_PROJECT_ROOT), check=False)
+    raise SystemExit(completed.returncode)
+
+
+def _configure_local_cuda_device() -> None:
+    """在 torchrun 启动时，尽早把每个进程绑到自己的本地 GPU。"""
+    local_rank = os.environ.get("LOCAL_RANK")
+    if local_rank is None:
+        return
+
+    try:
+        import torch
+    except ImportError:
+        return
+
+    if torch.cuda.is_available():
+        torch.cuda.set_device(int(local_rank))
+
+
+def _resolve_output_dir(output_dir_base: str, resume_path: str, log_tag: str) -> str:
+    """让 torchrun 的多个进程使用同一个输出目录。"""
+    if resume_path:
+        output_dir = str(Path(resume_path).parent)
+        print(f"{log_tag} Resume from: {resume_path}")
+        print(f"{log_tag} Continue writing to: {output_dir}")
+        return output_dir
+
+    rank = int(os.environ.get("RANK", "0"))
+    base_path = Path(output_dir_base)
+    base_path.mkdir(parents=True, exist_ok=True)
+    run_key = os.environ.get("TORCHELASTIC_RUN_ID") or os.environ.get("MASTER_PORT", "default")
+    marker_path = base_path / f".ddp_run_{run_key}"
+    wait_started_at = time.time()
+
+    if rank == 0:
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        output_dir = str(base_path / timestamp)
+        os.makedirs(output_dir, exist_ok=True)
+        marker_path.write_text(output_dir, encoding="utf-8")
+        print(f"{log_tag} Output dir: {output_dir}")
+        return output_dir
+
+    for _ in range(300):
+        if marker_path.exists() and marker_path.stat().st_mtime >= wait_started_at - 1:
+            return marker_path.read_text(encoding="utf-8").strip()
+        time.sleep(0.1)
+    raise TimeoutError(f"Timed out waiting for DDP output dir marker: {marker_path}")
+
+
 def _resolve_pretrain_settings(
     projector_scale: list[str],
     use_rfdetr_pretrain: bool,
@@ -146,15 +260,13 @@ def run_training(
     log_tag = log_prefix or "[Train]"
 
     resume_path = RESUME
-    if resume_path:
-        output_dir = str(Path(resume_path).parent)
-        print(f"{log_tag} Resume from: {resume_path}")
-        print(f"{log_tag} Continue writing to: {output_dir}")
-    else:
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-        output_dir = os.path.join(output_dir_base, timestamp)
-        os.makedirs(output_dir, exist_ok=True)
-        print(f"{log_tag} Output dir: {output_dir}")
+    _maybe_relaunch_with_torchrun(log_tag)
+    _configure_local_cuda_device()
+    output_dir = _resolve_output_dir(output_dir_base, resume_path, log_tag)
+
+    import rfdetr.models.backbone.dinov2_with_windowed_attn as dinov2_windowed
+
+    print(f"{log_tag} RF-DETR source: {Path(dinov2_windowed.__file__).resolve()}", flush=True)
 
     model_cfg = RFDETRBaseConfig(
         num_classes=NUM_CLASSES,
@@ -164,6 +276,7 @@ def run_training(
         projector_scale=PROJECTOR_SCALE,
         resolution=RESOLUTION,
         positional_encoding_size=POSITIONAL_ENCODING_SIZE,
+        gradient_checkpointing=GRADIENT_CHECKPOINTING,
     )
     model_kwargs = model_cfg.model_dump()
     model_kwargs["dual_modal"] = dual_modal
@@ -237,6 +350,8 @@ def run_training(
         f"batch={BATCH_SIZE}x{GRAD_ACCUM_STEPS}={effective_batch}, "
         f"max_train_batches={MAX_TRAIN_BATCHES}, max_val_batches={MAX_VAL_BATCHES}, "
         f"lr={LR}, scheduler={LR_SCHEDULER}, workers={NUM_WORKERS}, "
+        f"num_gpus={NUM_GPUS}, "
+        f"gradient_checkpointing={GRADIENT_CHECKPOINTING}, "
         f"pin_memory={PIN_MEMORY}, persistent_workers={PERSISTENT_WORKERS}, "
         f"multi_scale={MULTI_SCALE}, expanded_scales={EXPANDED_SCALES}, "
         f"batch_resize={not DO_RANDOM_RESIZE_VIA_PADDING}, "

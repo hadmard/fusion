@@ -18,6 +18,7 @@ from typing import Any, DefaultDict, List
 
 import numpy as np
 import torch
+from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader
 
 import rfdetr.util.misc as utils
@@ -202,9 +203,10 @@ class Model:
 
         utils.init_distributed_mode(args)
         device = torch.device(args.device)
-        random.seed(args.seed)
-        np.random.seed(args.seed)
-        torch.manual_seed(args.seed)
+        seed = args.seed + utils.get_rank()
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
 
         criterion, postprocess = build_criterion_and_postprocessors(args)
         model = self.model.to(device)
@@ -213,6 +215,13 @@ class Model:
         n_parameters = sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
         param_dicts = [group for group in get_param_dict(args, model_without_ddp) if group["params"].requires_grad]
         optimizer = torch.optim.AdamW(param_dicts, lr=args.lr, weight_decay=args.weight_decay)
+        if args.distributed:
+            ddp_kwargs = {"static_graph": True}
+            if args.device == "cuda":
+                ddp_kwargs["device_ids"] = [args.gpu]
+                ddp_kwargs["output_device"] = args.gpu
+            model = DistributedDataParallel(model, find_unused_parameters=False, **ddp_kwargs)
+            model_without_ddp = model.module
 
         if args.dual_modal:
             from custom.data.dual_collate import dual_collate_fn
@@ -264,7 +273,15 @@ class Model:
         dataset_val = _limit_dataset_for_smoke(dataset_val, max_val_batches, args.batch_size)
         dataset_test = _limit_dataset_for_smoke(dataset_test, max_test_batches, args.batch_size)
 
-        sampler_train = torch.utils.data.RandomSampler(dataset_train)
+        if args.distributed:
+            sampler_train = torch.utils.data.DistributedSampler(dataset_train, shuffle=True)
+            sampler_val = torch.utils.data.DistributedSampler(dataset_val, shuffle=False)
+            sampler_test = torch.utils.data.DistributedSampler(dataset_test, shuffle=False)
+        else:
+            sampler_train = torch.utils.data.RandomSampler(dataset_train)
+            sampler_val = torch.utils.data.SequentialSampler(dataset_val)
+            sampler_test = torch.utils.data.SequentialSampler(dataset_test)
+
         loader_kwargs = {"collate_fn": collate_fn, "num_workers": args.num_workers}
         if args.device == "cuda":
             loader_kwargs["pin_memory"] = True if args.pin_memory is None else bool(args.pin_memory)
@@ -275,9 +292,6 @@ class Model:
                 loader_kwargs["persistent_workers"] = bool(args.persistent_workers)
             if args.prefetch_factor is not None:
                 loader_kwargs["prefetch_factor"] = int(args.prefetch_factor)
-
-        sampler_val = torch.utils.data.SequentialSampler(dataset_val)
-        sampler_test = torch.utils.data.SequentialSampler(dataset_test)
 
         if max_train_batches > 0:
             batch_sampler_train = torch.utils.data.BatchSampler(
@@ -290,7 +304,7 @@ class Model:
                 batch_sampler=batch_sampler_train,
                 **loader_kwargs,
             )
-        elif len(dataset_train) < effective_batch_size * 5:
+        elif not args.distributed and len(dataset_train) < effective_batch_size * 5:
             sampler = torch.utils.data.RandomSampler(
                 dataset_train,
                 replacement=True,
@@ -321,7 +335,7 @@ class Model:
         else:
             self.ema_m = None
 
-        steps_per_epoch = max(1, math.ceil(len(dataset_train) / max(effective_batch_size, 1)))
+        steps_per_epoch = max(1, len(data_loader_train))
         total_training_steps = steps_per_epoch * args.epochs
         warmup_steps = int(steps_per_epoch * args.warmup_epochs)
 
@@ -357,6 +371,9 @@ class Model:
         start_time = datetime.datetime.now()
 
         for epoch in range(getattr(args, "start_epoch", 0), args.epochs):
+            if args.distributed and hasattr(sampler_train, "set_epoch"):
+                sampler_train.set_epoch(epoch)
+
             model.train()
             criterion.train()
             train_stats = train_one_epoch(
@@ -419,8 +436,9 @@ class Model:
                     )
 
             log_stats.update(best_map_holder.summary())
-            with (output_dir / "log.txt").open("a", encoding="utf-8") as file:
-                file.write(json.dumps(log_stats, ensure_ascii=False) + "\n")
+            if utils.is_main_process():
+                with (output_dir / "log.txt").open("a", encoding="utf-8") as file:
+                    file.write(json.dumps(log_stats, ensure_ascii=False) + "\n")
 
             for callback in callbacks["on_fit_epoch_end"]:
                 callback(log_stats)
@@ -432,24 +450,32 @@ class Model:
             best_regular_stats is None or best_ema_stats["coco_eval_bbox"][0] >= best_regular_stats["coco_eval_bbox"][0]
         )
         best_checkpoint = output_dir / ("checkpoint_best_ema.pth" if best_is_ema else "checkpoint_best_regular.pth")
-        if best_checkpoint.exists():
+        if utils.is_main_process() and best_checkpoint.exists():
             shutil.copy2(best_checkpoint, output_dir / "checkpoint_best_total.pth")
             utils.strip_checkpoint(output_dir / "checkpoint_best_total.pth")
 
-        best_results = best_ema_stats if best_is_ema and best_ema_stats is not None else best_regular_stats or test_stats
-        with (output_dir / "results.json").open("w", encoding="utf-8") as file:
-            json.dump(best_results["results_json"], file, ensure_ascii=False, indent=2)
+        if args.distributed:
+            torch.distributed.barrier()
+
+        if utils.is_main_process():
+            best_results = best_ema_stats if best_is_ema and best_ema_stats is not None else best_regular_stats or test_stats
+            with (output_dir / "results.json").open("w", encoding="utf-8") as file:
+                json.dump(best_results["results_json"], file, ensure_ascii=False, indent=2)
 
         if args.run_test and (output_dir / "checkpoint_best_total.pth").exists():
             best_state = torch.load(output_dir / "checkpoint_best_total.pth", map_location="cpu", weights_only=False)["model"]
-            model.load_state_dict(best_state, strict=False)
+            model_without_ddp.load_state_dict(best_state, strict=False)
             model.eval()
             test_stats, _ = evaluate(model, criterion, postprocess, data_loader_test, base_ds_test, device, args=args)
-            with (output_dir / "results.json").open("r", encoding="utf-8") as file:
-                results = json.load(file)
-            results["test"] = test_stats["results_json"]
-            with (output_dir / "results.json").open("w", encoding="utf-8") as file:
-                json.dump(results, file, ensure_ascii=False, indent=2)
+            if utils.is_main_process():
+                with (output_dir / "results.json").open("r", encoding="utf-8") as file:
+                    results = json.load(file)
+                results["test"] = test_stats["results_json"]
+                with (output_dir / "results.json").open("w", encoding="utf-8") as file:
+                    json.dump(results, file, ensure_ascii=False, indent=2)
+
+        if args.distributed:
+            torch.distributed.barrier()
 
         for callback in callbacks["on_train_end"]:
             callback()

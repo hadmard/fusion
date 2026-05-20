@@ -14,6 +14,7 @@ from typing import Dict, List, Optional, Set, Tuple, Union
 import torch
 from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
+from torch.utils.checkpoint import checkpoint
 from transformers.activations import ACT2FN
 from transformers.configuration_utils import PretrainedConfig
 from transformers.modeling_outputs import (
@@ -705,12 +706,13 @@ class WindowedDinov2WithRegistersEncoder(nn.Module):
             layer_head_mask = head_mask[i] if head_mask is not None else None
 
             if self.gradient_checkpointing and self.training:
-                layer_outputs = self._gradient_checkpointing_func(
+                layer_outputs = checkpoint(
                     layer_module.__call__,
                     hidden_states,
                     layer_head_mask,
                     output_attentions,
                     run_full_attention,
+                    use_reentrant=False,
                 )
             else:
                 layer_outputs = layer_module(hidden_states, layer_head_mask, output_attentions, run_full_attention)
