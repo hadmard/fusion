@@ -14,9 +14,9 @@
        分支A：DualPMLGuidedCrop(label=1) — 围绕 PML 框外扩裁剪
        分支B：DualRandomCrop（384~600）— 普通随机裁剪
 
-    3. DualResizePad
-       保持裁剪区域纵横比，仅在裁剪区域大于基准画布时等比缩小，
-       再同步 padding 到 batch resize 的基准画布。
+    3. DualSquareResize
+       将裁剪后的 UV/White 同步缩放到基准尺寸，避免在图像内部引入无法
+       传给 NestedTensor mask 的 padding 区域。
 
   外观增强：
     4. DualIndustrialPhotometricJitter  p=0.5
@@ -367,6 +367,8 @@ class DualPMLGuidedCrop:
         self.label = label
         self.margin_ratio = margin_ratio
         self.fallback_to_random_crop = fallback_to_random_crop
+        self.random_crop_min_size = random_crop_min_size
+        self.random_crop_max_size = random_crop_max_size
         self.fallback_crop = DualRandomCrop(
             min_size=random_crop_min_size,
             max_size=random_crop_max_size,
@@ -403,6 +405,25 @@ class DualPMLGuidedCrop:
 
         crop_w = max(1, right - left)
         crop_h = max(1, bottom - top)
+        min_crop_w = min(img_w, self.random_crop_min_size)
+        min_crop_h = min(img_h, self.random_crop_min_size)
+
+        if crop_w < min_crop_w or crop_h < min_crop_h:
+            center_x = (left + right) / 2.0
+            center_y = (top + bottom) / 2.0
+            crop_w = max(crop_w, min_crop_w)
+            crop_h = max(crop_h, min_crop_h)
+
+            left = int(round(center_x - crop_w / 2.0))
+            top = int(round(center_y - crop_h / 2.0))
+            left = min(max(left, 0), max(img_w - crop_w, 0))
+            top = min(max(top, 0), max(img_h - crop_h, 0))
+            right = min(left + crop_w, img_w)
+            bottom = min(top + crop_h, img_h)
+
+            crop_w = max(1, right - left)
+            crop_h = max(1, bottom - top)
+
         region = (top, left, crop_h, crop_w)
 
         img_uv, target = crop(img_uv, target, region)
@@ -580,7 +601,7 @@ def make_dual_transforms(
                     ),
                     p=0.5,
                 ),
-                DualResizePad([batch_resize_base_size]),
+                DualSquareResize([batch_resize_base_size]),
                 DualIndustrialPhotometricJitter(p=0.5),
                 normalize,
             ]

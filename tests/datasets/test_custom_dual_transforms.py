@@ -8,6 +8,8 @@ from custom.data.dual_transforms import (
     DualPMLGuidedCrop,
     DualRandomCrop,
     DualResizePad,
+    DualSquareResize,
+    make_dual_transforms,
 )
 
 
@@ -43,6 +45,28 @@ def _target_with_boxes() -> dict:
     }
 
 
+def _flatten_transforms(transform) -> list:
+    flattened = [transform]
+    for child in getattr(transform, "transforms", []):
+        flattened.extend(_flatten_transforms(child))
+    return flattened
+
+
+def test_train_transforms_resize_without_internal_padding() -> None:
+    transform = make_dual_transforms(
+        image_set="train",
+        resolution=128,
+        multi_scale=False,
+        patch_size=16,
+        num_windows=2,
+    )
+
+    transform_types = {type(item) for item in _flatten_transforms(transform)}
+
+    assert DualSquareResize in transform_types
+    assert DualResizePad not in transform_types
+
+
 def test_resize_pad_keeps_uv_white_geometry_synchronized() -> None:
     transform = DualResizePad([64])
     img_uv = _make_rgb_image((40, 20), (255, 0, 0))
@@ -67,20 +91,25 @@ def test_resize_pad_keeps_uv_white_geometry_synchronized() -> None:
     )
 
 
-def test_pml_guided_crop_uses_label_one_and_preserves_pair_alignment() -> None:
-    transform = DualPMLGuidedCrop(label=1, margin_ratio=(0.0, 0.0))
+def test_pml_guided_crop_uses_minimum_window_and_preserves_pair_alignment() -> None:
+    transform = DualPMLGuidedCrop(
+        label=1,
+        margin_ratio=(0.0, 0.0),
+        random_crop_min_size=40,
+        random_crop_max_size=60,
+    )
     img_uv = _make_rgb_image((100, 80), (255, 0, 0))
     img_white = _make_rgb_image((100, 80), (0, 255, 0))
 
     out_uv, out_white, out_target = transform(img_uv, img_white, _target_with_boxes())
 
-    assert out_uv.size == (20, 20)
-    assert out_white.size == (20, 20)
+    assert out_uv.size == (40, 40)
+    assert out_white.size == (40, 40)
     assert _nonzero_region(out_uv) == _nonzero_region(out_white)
     assert out_target["labels"].tolist() == [1]
     assert torch.allclose(
         out_target["boxes"],
-        torch.tensor([[0.0, 0.0, 20.0, 20.0]], dtype=torch.float32),
+        torch.tensor([[10.0, 10.0, 30.0, 30.0]], dtype=torch.float32),
     )
 
 

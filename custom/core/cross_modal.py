@@ -370,6 +370,7 @@ class SingleLevelCrossModalFusion(nn.Module):
         num_points: int = 4,
         mlp_ratio: float = 4.0,
         dropout: float = 0.0,
+        residual_gate_init: float = 1e-3,
     ):
         super().__init__()
 
@@ -393,8 +394,9 @@ class SingleLevelCrossModalFusion(nn.Module):
             nn.Dropout(dropout),
         )
         self.output_projector = ChannelProjector(fusion_dim, input_dim)
-        nn.init.zeros_(self.output_projector.proj.weight)
-        nn.init.zeros_(self.output_projector.proj.bias)
+        self.residual_gate = nn.Parameter(
+            torch.tensor(float(residual_gate_init), dtype=torch.float32)
+        )
 
     def forward(
         self,
@@ -440,7 +442,9 @@ class SingleLevelCrossModalFusion(nn.Module):
 
         fused_tokens = projected_uv + read_tokens
         fused_tokens = fused_tokens + self.final_ffn(self.final_ffn_norm(fused_tokens))
-        fusion_delta = self.output_projector.forward_tokens(fused_tokens)
+        fusion_delta = self.residual_gate.to(
+            fused_tokens.dtype
+        ) * self.output_projector.forward_tokens(fused_tokens)
         fused_tokens = uv_tokens + fusion_delta
         fused_tokens = _apply_padding_mask(fused_tokens, uv_mask)
         return _restore_layout(fused_tokens, uv_layout)

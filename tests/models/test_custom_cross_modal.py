@@ -52,7 +52,7 @@ def test_same_depth_fusion_updates_all_encoder_features_before_projector() -> No
         assert not torch.equal(fused_feature, uv_features[index])
 
 
-def test_single_level_fusion_starts_as_uv_residual_identity() -> None:
+def test_single_level_fusion_starts_with_small_trainable_white_residual() -> None:
     torch.manual_seed(0)
     fusion = SingleLevelCrossModalFusion(
         input_dim=8,
@@ -62,10 +62,21 @@ def test_single_level_fusion_starts_as_uv_residual_identity() -> None:
     uv = torch.randn(1, 8, 4, 4)
     white = torch.randn(1, 8, 4, 4)
 
-    with torch.no_grad():
-        fused = fusion(uv, white)
+    fused = fusion(uv, white)
 
-    assert torch.allclose(fused, uv, atol=1e-6)
+    delta = (fused - uv).abs()
+    assert torch.allclose(
+        fusion.residual_gate.detach(),
+        torch.tensor(1e-3),
+    )
+    assert delta.max() > 0
+    assert delta.max() < 0.1
+
+    loss = fused.pow(2).mean()
+    loss.backward()
+
+    assert fusion.white_projector.proj.weight.grad is not None
+    assert fusion.white_projector.proj.weight.grad.abs().sum() > 0
 
 
 def test_multi_level_fusion_keeps_one_read_per_depth() -> None:

@@ -25,6 +25,35 @@ def test_pretrain_settings_support_dinov2_only_training() -> None:
     assert label == "dinov2"
 
 
+def test_run_training_passes_regularization_to_model_kwargs(monkeypatch, tmp_path) -> None:
+    recorded = {}
+
+    class _FakeModel:
+        def __init__(self, **kwargs):
+            recorded["model_kwargs"] = kwargs
+
+        def train(self, **kwargs):
+            recorded["train_kwargs"] = kwargs
+
+    import rfdetr.main as rfdetr_main
+
+    monkeypatch.setattr(run_train, "NUM_GPUS", 1)
+    monkeypatch.setattr(run_train, "RESUME", "")
+    monkeypatch.setattr(run_train, "DROPOUT", 0.23)
+    monkeypatch.setattr(run_train, "DROP_PATH", 0.34)
+    monkeypatch.setattr(rfdetr_main, "Model", _FakeModel)
+
+    run_train.run_training(
+        output_base_dir=str(tmp_path),
+        log_prefix="[Test]",
+    )
+
+    assert recorded["model_kwargs"]["dropout"] == 0.23
+    assert recorded["model_kwargs"]["drop_path"] == 0.34
+    assert recorded["train_kwargs"]["dropout"] == 0.23
+    assert recorded["train_kwargs"]["drop_path"] == 0.34
+
+
 def test_torchrun_process_accepts_matching_world_size(monkeypatch) -> None:
     monkeypatch.setattr(run_train, "NUM_GPUS", 2)
     monkeypatch.setenv("LOCAL_RANK", "0")

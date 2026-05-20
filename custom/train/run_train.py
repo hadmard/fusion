@@ -266,6 +266,8 @@ def run_training(
     model_kwargs["dual_modal"] = dual_modal
     model_kwargs["force_no_pretrain"] = force_no_pretrain
     model_kwargs["load_dinov2_weights"] = USE_DINOV2_PRETRAIN
+    model_kwargs["dropout"] = DROPOUT
+    model_kwargs["drop_path"] = DROP_PATH
 
     model = Model(**model_kwargs)
     callbacks = defaultdict(list)
