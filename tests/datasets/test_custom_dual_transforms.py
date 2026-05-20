@@ -4,6 +4,7 @@ import torch
 from PIL import Image
 
 from custom.data.dual_transforms import (
+    DualIndustrialPhotometricJitter,
     DualPMLGuidedCrop,
     DualRandomCrop,
     DualResizePad,
@@ -98,3 +99,27 @@ def test_random_crop_preserves_pair_alignment_and_valid_boxes() -> None:
     assert torch.all(out_target["boxes"][:, 1::2] >= 0)
     assert torch.all(out_target["boxes"][:, 0::2] <= out_uv.width)
     assert torch.all(out_target["boxes"][:, 1::2] <= out_uv.height)
+
+
+def test_industrial_photometric_jitter_changes_pixels_only() -> None:
+    transform = DualIndustrialPhotometricJitter(
+        p=1.0,
+        uv_brightness=(1.1, 1.1),
+        uv_contrast=(1.0, 1.0),
+        white_brightness=(0.9, 0.9),
+        white_contrast=(1.0, 1.0),
+        white_blur_p=0.0,
+        white_noise_p=0.0,
+    )
+    img_uv = _make_rgb_image((16, 16), (100, 100, 100))
+    img_white = _make_rgb_image((16, 16), (120, 120, 120))
+    target = _target_with_boxes()
+
+    out_uv, out_white, out_target = transform(img_uv, img_white, target)
+
+    assert out_uv.size == img_uv.size
+    assert out_white.size == img_white.size
+    assert out_uv.getpixel((0, 0))[0] > img_uv.getpixel((0, 0))[0]
+    assert out_white.getpixel((0, 0))[0] < img_white.getpixel((0, 0))[0]
+    assert out_target is target
+    assert torch.equal(out_target["boxes"], target["boxes"])

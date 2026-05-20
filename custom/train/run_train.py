@@ -45,9 +45,7 @@ CLASS_NAMES = ["NPML", "PML", "PM"]
 NUM_CLASSES = 3
 
 # Model
-USE_RFDETR_PRETRAIN = False
-RFDETR_PRETRAIN_WEIGHTS = "rf-detr-base.pth"
-USE_DINOV2_PRETRAIN = False
+USE_DINOV2_PRETRAIN = True
 USE_WHITE = True
 FUSION_TYPE = "uv_queries_white"
 PROJECTOR_SCALE = ["P3", "P4"]
@@ -60,7 +58,7 @@ RESUME = ""
 
 # Training
 EPOCHS = 160
-BATCH_SIZE = 4
+BATCH_SIZE = 6
 GRAD_ACCUM_STEPS = 3
 MAX_TRAIN_BATCHES = 0
 MAX_VAL_BATCHES = 0
@@ -186,6 +184,7 @@ def _resolve_output_dir(output_dir_base: str, resume_path: str, log_tag: str) ->
         print(f"{log_tag} Continue writing to: {output_dir}")
         return output_dir
 
+    explicit_output_dir = os.environ.get("FUSION_OUTPUT_DIR")
     rank = int(os.environ.get("RANK", "0"))
     base_path = Path(output_dir_base)
     base_path.mkdir(parents=True, exist_ok=True)
@@ -194,8 +193,7 @@ def _resolve_output_dir(output_dir_base: str, resume_path: str, log_tag: str) ->
     wait_started_at = time.time()
 
     if rank == 0:
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-        output_dir = str(base_path / timestamp)
+        output_dir = explicit_output_dir or str(base_path / datetime.now().strftime("%Y-%m-%d_%H%M%S"))
         os.makedirs(output_dir, exist_ok=True)
         marker_path.write_text(output_dir, encoding="utf-8")
         print(f"{log_tag} Output dir: {output_dir}")
@@ -210,28 +208,16 @@ def _resolve_output_dir(output_dir_base: str, resume_path: str, log_tag: str) ->
 
 def _resolve_pretrain_settings(
     projector_scale: list[str],
-    use_rfdetr_pretrain: bool,
-    rfdetr_pretrain_weights: str | None,
     use_dinov2_pretrain: bool,
 ) -> tuple[str | None, bool, str]:
     """
-    把训练区的预训练开关解析为 RF-DETR checkpoint 与 DINOv2 backbone 加载策略。
+    把训练区的预训练开关解析为 checkpoint 与 DINOv2 backbone 加载策略。
 
-    RF-DETR 整模型 checkpoint 会覆盖 backbone，因此启用它时不再单独加载 DINOv2。
-    当前 base checkpoint 只匹配单 `P4` projector；多尺度 projector 直接报错，避免
-    静默降级造成实验记录不清楚。
+    当前 custom 主线不再加载 RF-DETR 整模型 checkpoint；`pretrain_weights`
+    始终保持 None，只通过 `force_no_pretrain` 控制是否跳过 DINOv2 backbone
+    预训练权重。
     """
-    scales = list(projector_scale)
-    if use_rfdetr_pretrain:
-        if scales != ["P4"]:
-            raise ValueError(
-                "RF-DETR pretrain requires PROJECTOR_SCALE=['P4']; "
-                f"got PROJECTOR_SCALE={scales!r}. "
-                "Disable USE_RFDETR_PRETRAIN or switch PROJECTOR_SCALE to ['P4']."
-            )
-        if not rfdetr_pretrain_weights:
-            raise ValueError("RFDETR_PRETRAIN_WEIGHTS must be set when USE_RFDETR_PRETRAIN=True.")
-        return rfdetr_pretrain_weights, False, "rfdetr"
+    _ = projector_scale
 
     if use_dinov2_pretrain:
         return None, False, "dinov2"
@@ -252,8 +238,6 @@ def run_training(
     fusion_type = FUSION_TYPE
     pretrain_weights, force_no_pretrain, pretrain_mode = _resolve_pretrain_settings(
         projector_scale=PROJECTOR_SCALE,
-        use_rfdetr_pretrain=USE_RFDETR_PRETRAIN,
-        rfdetr_pretrain_weights=RFDETR_PRETRAIN_WEIGHTS,
         use_dinov2_pretrain=USE_DINOV2_PRETRAIN,
     )
     output_dir_base = output_base_dir or OUTPUT_BASE_DIR
@@ -281,6 +265,7 @@ def run_training(
     model_kwargs = model_cfg.model_dump()
     model_kwargs["dual_modal"] = dual_modal
     model_kwargs["force_no_pretrain"] = force_no_pretrain
+    model_kwargs["load_dinov2_weights"] = USE_DINOV2_PRETRAIN
 
     model = Model(**model_kwargs)
     callbacks = defaultdict(list)
@@ -295,6 +280,7 @@ def run_training(
         "use_white": use_white,
         "fusion_type": fusion_type,
         "force_no_pretrain": force_no_pretrain,
+        "load_dinov2_weights": USE_DINOV2_PRETRAIN,
         "epochs": EPOCHS,
         "batch_size": BATCH_SIZE,
         "grad_accum_steps": GRAD_ACCUM_STEPS,
@@ -359,7 +345,6 @@ def run_training(
         f"use_white={use_white}, fusion_type={fusion_type}, "
         f"projector_scale={PROJECTOR_SCALE}, "
         f"pretrain_mode={pretrain_mode}, "
-        f"use_rfdetr_pretrain={USE_RFDETR_PRETRAIN}, "
         f"use_dinov2_pretrain={USE_DINOV2_PRETRAIN}, "
         f"pretrain_weights={pretrain_weights or 'none'}, "
         f"force_no_pretrain={force_no_pretrain}"

@@ -18,12 +18,17 @@
        保持裁剪区域纵横比，仅在裁剪区域大于基准画布时等比缩小，
        再同步 padding 到 batch resize 的基准画布。
 
+  外观增强：
+    4. DualIndustrialPhotometricJitter  p=0.5
+       参考 RF-DETR 官方 industrial/conservative 推荐，对 UV 做轻微亮度/对比度扰动，
+       对 White 额外加入轻微模糊与噪声；不改变检测框。
+
   batch 级 resize：
-    4. 多尺度随机 resize 不在 dataset 单图阶段执行，而是在训练循环中
+    5. 多尺度随机 resize 不在 dataset 单图阶段执行，而是在训练循环中
        对整个 NestedTensor batch 使用同一个 scale 执行。
 
   最终后处理：
-    5. DualToTensor + DualNormalize
+    6. DualToTensor + DualNormalize
        转张量并以 ImageNet 均值/方差标准化；框转为归一化 cxcywh。
 
 
@@ -38,7 +43,7 @@
   - 所有 transform 的输入输出签名统一为：
         `(img_uv, img_white, target) -> (img_uv, img_white, target)`
   - 所有边界框变换都以 UV 图像为基准，因为标注来源于 UV。
-  - 当前训练链路不启用模态特异性外观扰动，只保留同步 flip/crop。
+  - 外观扰动不改变几何关系，因此不会修改 target 中的 boxes。
 """
 
 # ========== 第一部分：导入依赖 ==========
@@ -50,6 +55,7 @@ import torch
 import torch.nn.functional as torch_F
 import torchvision.transforms as TT
 import torchvision.transforms.functional as F
+from PIL import Image, ImageFilter
 
 from rfdetr.datasets.coco import compute_multi_scale_scales
 from rfdetr.util.box_ops import box_xyxy_to_cxcywh
@@ -404,6 +410,72 @@ class DualPMLGuidedCrop:
         return img_uv, img_white, target
 
 
+class DualIndustrialPhotometricJitter:
+    """
+    面向工业/缺陷检测的保守外观增强。
+
+    UV 主模态只做轻微亮度/对比度扰动，避免破坏荧光语义；White 模态额外
+    加入轻微模糊和噪声，以模拟白光成像中的照明与传感器波动。
+    """
+
+    def __init__(
+        self,
+        p: float = 0.5,
+        uv_brightness: Tuple[float, float] = (0.92, 1.08),
+        uv_contrast: Tuple[float, float] = (0.92, 1.08),
+        white_brightness: Tuple[float, float] = (0.85, 1.15),
+        white_contrast: Tuple[float, float] = (0.85, 1.15),
+        white_blur_p: float = 0.25,
+        white_blur_radius: Tuple[float, float] = (0.2, 0.8),
+        white_noise_p: float = 0.25,
+        white_noise_std: Tuple[float, float] = (2.0, 8.0),
+    ):
+        self.p = p
+        self.uv_brightness = uv_brightness
+        self.uv_contrast = uv_contrast
+        self.white_brightness = white_brightness
+        self.white_contrast = white_contrast
+        self.white_blur_p = white_blur_p
+        self.white_blur_radius = white_blur_radius
+        self.white_noise_p = white_noise_p
+        self.white_noise_std = white_noise_std
+
+    @staticmethod
+    def _sample(bounds: Tuple[float, float]) -> float:
+        low, high = bounds
+        return random.uniform(low, high)
+
+    @staticmethod
+    def _add_noise(image: Image.Image, std: float) -> Image.Image:
+        array = np.asarray(image).astype(np.float32)
+        noise = np.random.normal(loc=0.0, scale=std, size=array.shape).astype(np.float32)
+        array = np.clip(array + noise, 0, 255).astype(np.uint8)
+        return Image.fromarray(array, mode=image.mode)
+
+    def _jitter_uv(self, image: Image.Image) -> Image.Image:
+        image = F.adjust_brightness(image, self._sample(self.uv_brightness))
+        image = F.adjust_contrast(image, self._sample(self.uv_contrast))
+        return image
+
+    def _jitter_white(self, image: Image.Image) -> Image.Image:
+        image = F.adjust_brightness(image, self._sample(self.white_brightness))
+        image = F.adjust_contrast(image, self._sample(self.white_contrast))
+
+        if random.random() < self.white_blur_p:
+            image = image.filter(ImageFilter.GaussianBlur(radius=self._sample(self.white_blur_radius)))
+
+        if random.random() < self.white_noise_p:
+            image = self._add_noise(image, std=self._sample(self.white_noise_std))
+
+        return image
+
+    def __call__(self, img_uv, img_white, target):
+        if random.random() >= self.p:
+            return img_uv, img_white, target
+
+        return self._jitter_uv(img_uv), self._jitter_white(img_white), target
+
+
 # ========== 第四部分：张量化与归一化 ==========
 class DualToTensor:
     """将两路 PIL 图像同时转为张量。"""
@@ -509,6 +581,7 @@ def make_dual_transforms(
                     p=0.5,
                 ),
                 DualResizePad([batch_resize_base_size]),
+                DualIndustrialPhotometricJitter(p=0.5),
                 normalize,
             ]
         )

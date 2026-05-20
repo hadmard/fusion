@@ -390,7 +390,7 @@ def build_dual_model(args):
         backbone_lora=args.backbone_lora,
         force_no_pretrain=args.force_no_pretrain,
         gradient_checkpointing=args.gradient_checkpointing,
-        load_dinov2_weights=args.pretrain_weights is None,
+        load_dinov2_weights=getattr(args, "load_dinov2_weights", args.pretrain_weights is None),
         patch_size=args.patch_size,
         num_windows=args.num_windows,
         positional_encoding_size=args.positional_encoding_size,
